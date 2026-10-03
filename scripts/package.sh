@@ -42,7 +42,7 @@ mkdir -p "$DIST"
 
 echo "==> Rendering user guide PDF"
 { echo "<style>"; cat docs/user-guide-print.css; echo "</style>"; } > "$WORK/head.html"
-pandoc docs/user-guide.md -o "$WORK/user-guide.pdf" \
+pandoc README.md -o "$WORK/user-guide.pdf" \
   --pdf-engine=wkhtmltopdf \
   --metadata pagetitle="Xenovision User Guide" \
   --include-in-header="$WORK/head.html" \
