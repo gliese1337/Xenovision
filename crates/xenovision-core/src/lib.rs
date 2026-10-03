@@ -1,0 +1,23 @@
+pub mod adaptation;
+pub mod blackbody;
+pub mod cie;
+pub mod comparison;
+pub mod curve;
+pub mod curve_set;
+pub mod fixture_library;
+pub mod fixtures;
+pub mod govardovskii;
+pub mod gpu;
+pub mod gradient;
+pub mod hyperspectral;
+pub mod illumination;
+pub mod interp;
+pub mod linalg;
+pub mod narrowband;
+pub mod oil_droplet;
+pub mod pipeline;
+pub mod preset_store;
+pub mod sensor_presets;
+
+pub use curve::{CurveType, QuantityKind, SpectralCurve};
+pub use curve_set::{CurveSet, CurveSetError};

@@ -1,0 +1,36 @@
+[package]
+name = "xenovision-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# Resolves the OS-appropriate per-user data directory, for user-editable
+# preset/fixture files (§8.3's "known, user-visible location" - needed now
+# for illuminant presets, and will be reused for Phase 6/8's species
+# fixture files).
+directories = "5"
+serde = { version = "1", features = ["derive"] }
+# float_roundtrip: serde_json's default float parser isn't guaranteed to
+# recover the exact f64 bit pattern that was serialized (it's documented
+# as a performance/precision tradeoff). This app persists precise
+# numeric curve data as its core job, so exact round-trip matters more
+# than the small parsing-speed cost.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+thiserror = "1"
+# Hyperspectral image import (§3.4): ENVI and GeoTIFF reading, validated
+# in spikes/spike_b
+gdal = { version = "0.17", optional = true }
+# .mat hypercube import (§3.4.1 point 3) - read-only, MATLAB v5 only
+matfile = "0.5"
+wgpu = "30.0.1"
+pollster = "1.0.1"
+bytemuck = { version = "1.25.2", features = ["derive"] }
+
+[features]
+# ENVI/GeoTIFF import links the native GDAL library (plus PROJ/GEOS),
+# which is the hard part of distributing binaries. On by default for
+# development; packages can be built without it (--no-default-features),
+# keeping .mat and text/CSV import.
+default = ["gdal"]
+gdal = ["dep:gdal"]

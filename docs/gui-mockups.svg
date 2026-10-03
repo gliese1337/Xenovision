@@ -1,0 +1,250 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 2100" font-family="Consolas, Menlo, monospace">
+  <rect width="1600" height="2100" fill="#1e1e1e"/>
+
+  <!-- ============ WINDOW 1: MAIN WORKSPACE ============ -->
+  <text x="20" y="30" fill="#e0e0e0" font-size="18" font-weight="bold">Window 1: Main Workspace</text>
+
+  <g transform="translate(20,45)">
+    <rect width="1560" height="620" fill="#2b2b2b" stroke="#555" stroke-width="2"/>
+    <!-- title bar -->
+    <rect width="1560" height="28" fill="#3a3a3a"/>
+    <text x="10" y="19" fill="#ccc" font-size="13">Workspace — Human (Homo sapiens)</text>
+    <text x="1480" y="19" fill="#888" font-size="12">[File] [Edit] [View]</text>
+
+    <!-- tab bar -->
+    <rect y="28" width="1560" height="30" fill="#2b2b2b"/>
+    <g font-size="13">
+      <rect x="0" y="28" width="90" height="30" fill="#444" stroke="#666"/>
+      <text x="22" y="48" fill="#fff">Human</text>
+      <rect x="90" y="28" width="80" height="30" fill="#333" stroke="#555"/>
+      <text x="112" y="48" fill="#aaa">Dog</text>
+      <rect x="170" y="28" width="80" height="30" fill="#333" stroke="#555"/>
+      <text x="188" y="48" fill="#aaa">Cat</text>
+      <rect x="250" y="28" width="110" height="30" fill="#333" stroke="#555"/>
+      <text x="262" y="48" fill="#aaa">Honeybee</text>
+      <rect x="360" y="28" width="95" height="30" fill="#333" stroke="#555"/>
+      <text x="378" y="48" fill="#aaa">Pigeon</text>
+      <rect x="455" y="28" width="30" height="30" fill="#333" stroke="#555"/>
+      <text x="465" y="48" fill="#aaa">+</text>
+    </g>
+
+    <!-- 3-column body -->
+    <!-- left rail -->
+    <rect x="0" y="58" width="220" height="562" fill="#262626" stroke="#444"/>
+    <text x="10" y="78" fill="#999" font-size="11">COLORSPACE CURVES</text>
+    <circle cx="18" cy="98" r="5" fill="#e07a3f"/>
+    <text x="30" y="102" fill="#ddd" font-size="12">L-cone (560nm)</text>
+    <circle cx="18" cy="122" r="5" fill="#4fae4f"/>
+    <text x="30" y="126" fill="#ddd" font-size="12">M-cone (530nm)</text>
+    <circle cx="18" cy="146" r="5" fill="#4f7fd6" stroke="#fff" stroke-width="1.5"/>
+    <text x="30" y="150" fill="#fff" font-size="12" font-weight="bold">S-cone (420nm) ◄ selected</text>
+    <line x1="10" y1="168" x2="210" y2="168" stroke="#444"/>
+    <text x="10" y="186" fill="#999" font-size="11">ISOLATED CURVES</text>
+    <circle cx="18" cy="206" r="5" fill="none" stroke="#888" stroke-width="1.5"/>
+    <text x="30" y="210" fill="#888" font-size="12">(none for Human)</text>
+
+    <rect x="10" y="520" width="200" height="30" fill="#3a3a3a" stroke="#666"/>
+    <text x="20" y="540" fill="#ddd" font-size="12">+ New Curve ▾</text>
+    <rect x="10" y="555" width="200" height="90" fill="#333" stroke="#555" stroke-dasharray="3,2"/>
+    <text x="20" y="572" fill="#aaa" font-size="11">Blank curve</text>
+    <text x="20" y="590" fill="#aaa" font-size="11">Black-body...</text>
+    <text x="20" y="608" fill="#aaa" font-size="11">Composite LED...</text>
+    <text x="20" y="626" fill="#aaa" font-size="11">From image...</text>
+
+    <!-- center graph -->
+    <rect x="220" y="58" width="820" height="400" fill="#202020" stroke="#444"/>
+    <text x="230" y="76" fill="#999" font-size="11">GRAPH — spectrum background + overlaid curves (§1.4)</text>
+    <!-- spectrum gradient bar -->
+    <defs>
+      <linearGradient id="spec" x1="0" x2="1">
+        <stop offset="0%" stop-color="#ffffff"/>
+        <stop offset="8%" stop-color="#8fd6ff"/>
+        <stop offset="20%" stop-color="#7f00ff"/>
+        <stop offset="35%" stop-color="#0000ff"/>
+        <stop offset="48%" stop-color="#00ff00"/>
+        <stop offset="60%" stop-color="#ffff00"/>
+        <stop offset="72%" stop-color="#ff7f00"/>
+        <stop offset="85%" stop-color="#ff0000"/>
+        <stop offset="100%" stop-color="#1a0000"/>
+      </linearGradient>
+    </defs>
+    <rect x="240" y="420" width="780" height="20" fill="url(#spec)"/>
+    <polyline points="240,200 300,180 360,100 420,160 480,340 540,400 600,410 660,415 720,417 780,418 840,419 900,420 960,420 1020,420" fill="none" stroke="#4f7fd6" stroke-width="3"/>
+    <circle cx="360" cy="100" r="5" fill="#fff" stroke="#4f7fd6" stroke-width="2"/>
+    <text x="370" y="95" fill="#4f7fd6" font-size="10">drag handle</text>
+
+    <!-- opponent contrast strip -->
+    <rect x="220" y="458" width="820" height="60" fill="#262626" stroke="#444"/>
+    <text x="230" y="476" fill="#999" font-size="11">OPPONENT CONTRASTS (§4.2.4, set-level)</text>
+    <rect x="230" y="484" width="70" height="26" fill="#3a3a3a" stroke="#666"/>
+    <text x="240" y="501" fill="#ddd" font-size="11">L − M</text>
+    <rect x="310" y="484" width="110" height="26" fill="#3a3a3a" stroke="#666"/>
+    <text x="320" y="501" fill="#ddd" font-size="11">S − (L+M)</text>
+    <rect x="430" y="484" width="70" height="26" fill="#333" stroke="#555" stroke-dasharray="3,2"/>
+    <text x="440" y="501" fill="#999" font-size="11">+ New</text>
+
+    <!-- bottom: undo/redo -->
+    <rect x="220" y="522" width="820" height="98" fill="#242424" stroke="#444"/>
+    <rect x="230" y="530" width="30" height="24" fill="#3a3a3a" stroke="#666"/>
+    <text x="238" y="547" fill="#ddd" font-size="13">↶</text>
+    <rect x="265" y="530" width="30" height="24" fill="#3a3a3a" stroke="#666"/>
+    <text x="273" y="547" fill="#ddd" font-size="13">↷</text>
+    <text x="305" y="547" fill="#777" font-size="10">(per-tab history, §1.7)</text>
+
+    <!-- right inspector -->
+    <rect x="1040" y="58" width="520" height="562" fill="#262626" stroke="#444"/>
+    <text x="1050" y="78" fill="#999" font-size="11">INSPECTOR — S-cone (420nm)</text>
+
+    <rect x="1050" y="90" width="500" height="160" fill="#2b2b2b" stroke="#444"/>
+    <text x="1058" y="106" fill="#888" font-size="10">POINT TABLE (§1.5)</text>
+    <g font-size="11" fill="#ccc">
+      <text x="1058" y="126">λ (nm)</text><text x="1150" y="126">value</text>
+      <text x="1058" y="144">400</text><text x="1150" y="144">0.82</text>
+      <text x="1058" y="160">420</text><text x="1150" y="160">1.00</text>
+      <text x="1058" y="176">440</text><text x="1150" y="176">0.71</text>
+      <text x="1058" y="192">460</text><text x="1150" y="192">0.33</text>
+    </g>
+    <rect x="1300" y="118" width="230" height="110" fill="#242424" stroke="#555"/>
+    <text x="1308" y="134" fill="#777" font-size="9">(row add/delete mirrors</text>
+    <text x="1308" y="146" fill="#777" font-size="9">graph handle add/delete)</text>
+
+    <rect x="1050" y="258" width="500" height="110" fill="#2b2b2b" stroke="#444"/>
+    <text x="1058" y="274" fill="#888" font-size="10">NOISE / LUMINANCE (§4.3)</text>
+    <g font-size="11" fill="#ccc">
+      <text x="1058" y="294">ω</text><text x="1100" y="294">(blank)</text>
+      <text x="1058" y="312">η</text><text x="1100" y="312">(blank)</text>
+      <text x="1058" y="330">w_i</text><text x="1100" y="330">0.02 (integral default, italic)</text>
+    </g>
+
+    <rect x="1050" y="378" width="500" height="120" fill="#2b2b2b" stroke="#444"/>
+    <text x="1058" y="394" fill="#888" font-size="10">METADATA / PROVENANCE (§4.2.5)</text>
+    <text x="1058" y="414" fill="#ccc" font-size="11">Quantity kind: Sensitivity</text>
+    <text x="1058" y="432" fill="#ccc" font-size="11">Citation: Schnapf, Kraft &amp; Baylor 1987</text>
+    <text x="1058" y="450" fill="#ccc" font-size="11">Notes: Govardovskii template, λmax 420nm</text>
+
+    <rect x="1050" y="508" width="500" height="100" fill="#2b2b2b" stroke="#444"/>
+    <text x="1058" y="524" fill="#888" font-size="10">VALIDATION FLAGS</text>
+    <text x="1058" y="544" fill="#d9a441" font-size="11">⚠ η unset on some curves in set</text>
+  </g>
+
+  <!-- ============ WINDOW 2: COMPARISON ============ -->
+  <text x="20" y="720" fill="#e0e0e0" font-size="18" font-weight="bold">Window 2: Comparison</text>
+  <g transform="translate(20,735)">
+    <rect width="1560" height="560" fill="#2b2b2b" stroke="#555" stroke-width="2"/>
+    <rect width="1560" height="28" fill="#3a3a3a"/>
+    <text x="10" y="19" fill="#ccc" font-size="13">Comparison — 2 species selected</text>
+
+    <!-- top control bar -->
+    <rect y="28" width="1560" height="40" fill="#242424"/>
+    <text x="10" y="52" fill="#ccc" font-size="12">Reference environment:</text>
+    <rect x="175" y="36" width="160" height="24" fill="#3a3a3a" stroke="#666"/>
+    <text x="183" y="52" fill="#ddd" font-size="11">Daylight D65 ▾</text>
+    <text x="360" y="52" fill="#ccc" font-size="12">Metric:</text>
+    <rect x="420" y="36" width="90" height="24" fill="#3a3a3a" stroke="#666"/>
+    <text x="428" y="52" fill="#ddd" font-size="11">ΔS ▾</text>
+
+    <!-- 3 columns -->
+    <rect x="0" y="68" width="260" height="492" fill="#262626" stroke="#444"/>
+    <text x="10" y="88" fill="#999" font-size="11">INPUT SPECTRA</text>
+    <rect x="10" y="98" width="14" height="14" fill="none" stroke="#4f7fd6"/>
+    <text x="14" y="109" fill="#4f7fd6" font-size="11">✓</text>
+    <text x="32" y="109" fill="#ddd" font-size="12">Flower A</text>
+    <rect x="10" y="122" width="14" height="14" fill="none" stroke="#4f7fd6"/>
+    <text x="14" y="133" fill="#4f7fd6" font-size="11">✓</text>
+    <text x="32" y="133" fill="#ddd" font-size="12">Flower B</text>
+    <rect x="10" y="146" width="14" height="14" fill="none" stroke="#666"/>
+    <text x="32" y="157" fill="#888" font-size="12">Leaf</text>
+    <rect x="10" y="180" width="180" height="26" fill="#333" stroke="#555" stroke-dasharray="3,2"/>
+    <text x="18" y="198" fill="#999" font-size="11">+ Add... (from curve set</text>
+    <text x="18" y="212" fill="#999" font-size="10">or Image Extraction window)</text>
+
+    <rect x="260" y="68" width="760" height="492" fill="#202020" stroke="#444"/>
+    <text x="270" y="88" fill="#999" font-size="11">COORDINATE TABLE (§3.3.1)</text>
+    <g font-size="11" fill="#ccc">
+      <text x="270" y="110">Spectrum</text><text x="400" y="110">L</text><text x="450" y="110">C1</text><text x="500" y="110">C2</text>
+      <text x="270" y="128">Flower A</text><text x="400" y="128">0.62</text><text x="450" y="128">0.11</text><text x="500" y="128">-0.04</text>
+      <text x="270" y="146">Flower B</text><text x="400" y="146">0.58</text><text x="450" y="146">0.09</text><text x="500" y="146">0.02</text>
+    </g>
+    <line x1="270" y1="166" x2="1010" y2="166" stroke="#444"/>
+
+    <text x="270" y="188" fill="#999" font-size="11">DIFFERENCE MATRIX (§3.3.2 / §6.3.2) — per-species sub-tabs since 2+ selected</text>
+    <g font-size="12">
+      <rect x="270" y="198" width="90" height="26" fill="#444" stroke="#666"/>
+      <text x="292" y="216" fill="#fff">Human</text>
+      <rect x="360" y="198" width="90" height="26" fill="#333" stroke="#555"/>
+      <text x="382" y="216" fill="#aaa">Dog</text>
+    </g>
+    <rect x="270" y="224" width="300" height="90" fill="#262626" stroke="#444"/>
+    <g font-size="11" fill="#ccc">
+      <text x="280" y="244"></text>
+      <text x="360" y="244">Flower A</text><text x="460" y="244">Flower B</text>
+      <text x="280" y="264">Flower A</text><text x="380" y="264">0</text><text x="470" y="264">1.8</text>
+      <text x="280" y="284">Flower B</text><text x="380" y="284">1.8</text><text x="470" y="284">0</text>
+    </g>
+
+    <text x="270" y="340" fill="#999" font-size="11">CROSS-SPECIES SUMMARY (§6.3.2) — shown because 2+ species selected</text>
+    <g font-size="11" fill="#ccc">
+      <text x="270" y="362">Pair</text><text x="400" y="362">Human ΔS</text><text x="520" y="362">Dog ΔS</text>
+      <text x="270" y="380">A vs B</text><text x="400" y="380">1.8</text><text x="520" y="380">0.9</text>
+    </g>
+
+    <rect x="1020" y="68" width="540" height="492" fill="#262626" stroke="#444"/>
+    <text x="1030" y="88" fill="#999" font-size="11">SPECIES SELECTOR</text>
+    <rect x="1030" y="98" width="14" height="14" fill="none" stroke="#4f7fd6"/>
+    <text x="1034" y="109" fill="#4f7fd6" font-size="11">✓</text>
+    <text x="1052" y="109" fill="#ddd" font-size="12">Human</text>
+    <circle cx="1200" cy="105" r="5" fill="#4a9" />
+    <text x="1210" y="109" fill="#4a9" font-size="9">lit-grounded</text>
+    <rect x="1030" y="122" width="14" height="14" fill="none" stroke="#4f7fd6"/>
+    <text x="1034" y="133" fill="#4f7fd6" font-size="11">✓</text>
+    <text x="1052" y="133" fill="#ddd" font-size="12">Dog</text>
+    <circle cx="1200" cy="129" r="5" fill="#d9a441" />
+    <text x="1210" y="133" fill="#d9a441" font-size="9">approximated</text>
+    <rect x="1030" y="146" width="14" height="14" fill="none" stroke="#666"/>
+    <text x="1052" y="157" fill="#888" font-size="12">Cat</text>
+    <circle cx="1200" cy="153" r="5" fill="#d9a441" />
+  </g>
+
+  <!-- ============ WINDOW 3: IMAGE EXTRACTION ============ -->
+  <text x="20" y="1330" fill="#e0e0e0" font-size="18" font-weight="bold">Window 3: Image Extraction</text>
+  <g transform="translate(20,1345)">
+    <rect width="1560" height="520" fill="#2b2b2b" stroke="#555" stroke-width="2"/>
+    <rect width="1560" height="28" fill="#3a3a3a"/>
+    <text x="10" y="19" fill="#ccc" font-size="13">Image Extraction — sample_canopy.hdr (ENVI, BIL)</text>
+
+    <rect x="0" y="28" width="1100" height="40" fill="#242424"/>
+    <text x="10" y="52" fill="#ccc" font-size="12">[Open File...]</text>
+    <text x="140" y="52" fill="#888" font-size="11">Format: ENVI   Bands: 224   Interleave: BIL   λ: 400–1000nm (from header)</text>
+
+    <rect x="0" y="68" width="1100" height="440" fill="#151515" stroke="#444"/>
+    <text x="10" y="88" fill="#999" font-size="11">IMAGE DISPLAY — false-color composite, region select (rect/lasso)</text>
+    <rect x="200" y="150" width="600" height="300" fill="#3a2f1a"/>
+    <rect x="200" y="150" width="600" height="300" fill="#4a3f2a" opacity="0.3"/>
+    <rect x="350" y="220" width="140" height="100" fill="none" stroke="#4f7fd6" stroke-width="2" stroke-dasharray="6,3"/>
+    <text x="355" y="214" fill="#4f7fd6" font-size="11">Region 1 (rect)</text>
+    <polygon points="550,260 620,240 650,310 580,340 540,300" fill="none" stroke="#e07a3f" stroke-width="2" stroke-dasharray="6,3"/>
+    <text x="555" y="235" fill="#e07a3f" font-size="11">Region 2 (lasso)</text>
+
+    <rect x="1100" y="28" width="460" height="480" fill="#262626" stroke="#444"/>
+    <text x="1110" y="48" fill="#999" font-size="11">EXTRACTED REGIONS</text>
+    <rect x="1110" y="58" width="440" height="50" fill="#2b2b2b" stroke="#555"/>
+    <text x="1118" y="74" fill="#ddd" font-size="11">sample_canopy_region1</text>
+    <text x="1118" y="90" fill="#888" font-size="10">avg spectrum, 224 bands → curve</text>
+    <rect x="1110" y="116" width="440" height="50" fill="#2b2b2b" stroke="#555"/>
+    <text x="1118" y="132" fill="#ddd" font-size="11">sample_canopy_region2</text>
+    <text x="1118" y="148" fill="#888" font-size="10">avg spectrum, 224 bands → curve</text>
+
+    <rect x="1110" y="180" width="440" height="80" fill="#242424" stroke="#555" stroke-dasharray="3,2"/>
+    <text x="1118" y="198" fill="#999" font-size="11">Tag as:</text>
+    <rect x="1118" y="206" width="110" height="24" fill="#3a3a3a" stroke="#666"/>
+    <text x="1126" y="222" fill="#ddd" font-size="10">Reflectance</text>
+    <rect x="1234" y="206" width="110" height="24" fill="#333" stroke="#555"/>
+    <text x="1242" y="222" fill="#999" font-size="10">Illumination</text>
+
+    <rect x="1110" y="272" width="440" height="40" fill="#3a3a3a" stroke="#666"/>
+    <text x="1118" y="296" fill="#ddd" font-size="12">Add to active Curve Set tab ▾</text>
+    <text x="1110" y="330" fill="#777" font-size="10">(sends curve to Workspace window's</text>
+    <text x="1110" y="344" fill="#777" font-size="10"> currently-active tab, or Comparison</text>
+    <text x="1110" y="358" fill="#777" font-size="10"> window's input-spectra list)</text>
+  </g>
+</svg>

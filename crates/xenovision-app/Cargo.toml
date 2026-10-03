@@ -1,0 +1,25 @@
+[package]
+name = "xenovision-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# accesskit (an eframe default feature) pulls in an AT-SPI/D-Bus
+# accessibility bridge (zbus/atspi) that throws repeated "broken pipe"
+# errors and kills the whole winit event loop in sandboxed/WSL
+# environments without a working D-Bus accessibility session. Not needed
+# yet, so left out rather than worked around.
+eframe = { version = "0.29", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "wayland",
+    "x11",
+] }
+egui = "0.29"
+xenovision-core = { path = "../xenovision-core", default-features = false }
+
+[features]
+# Passes through to xenovision-core: ENVI/GeoTIFF import via native GDAL.
+default = ["gdal"]
+gdal = ["xenovision-core/gdal"]

@@ -1,0 +1,13 @@
+[package]
+name = "spike_b"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "spike_b"
+path = "src/main.rs"
+
+[dependencies]
+gdal = "0.17"
+matfile = "0.5"
