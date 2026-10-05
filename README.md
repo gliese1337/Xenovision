@@ -1,9 +1,7 @@
 # Xenovision User Guide
 
 A reference to every window, menu, and gesture in the current (three-window)
-build. See `docs/design-doc.md` and `docs/gui-design-doc.md` if you want the
-modeling math or the UI architecture behind what's described here - this
-document is purely "how do I use it."
+build. See `docs/design-doc.md` if you want the modeling math.
 
 ## Overview
 

@@ -242,7 +242,7 @@ pub fn multi_curve_editor(
                 Some(v) => {
                     let p = axes.to_screen(wl, v);
                     if let Some(pp) = prev {
-                        painter.line_segment([pp, p], Stroke::new(2.5, color));
+                        painter.line_segment([pp, p], Stroke::new(2.5_f32, color));
                     }
                     prev = Some(p);
                 }
@@ -263,11 +263,11 @@ pub fn multi_curve_editor(
             let is_selected = *selected_point == Some(pi);
             let handle_color = if is_selected { Color32::YELLOW } else { color };
             painter.circle_filled(center, HANDLE_RADIUS, handle_color);
-            painter.circle_stroke(center, HANDLE_RADIUS, Stroke::new(1.0, Color32::BLACK));
+            painter.circle_stroke(center, HANDLE_RADIUS, Stroke::new(1.0_f32, Color32::BLACK));
         }
     }
 
-    painter.rect_stroke(rect, 0.0, Stroke::new(1.0, Color32::GRAY));
+    painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, Color32::GRAY));
 
     // Legend row: shows every curve's color + name, and doubles as the
     // curve picker (click a name to make it the add-point/remove-curve

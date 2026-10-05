@@ -146,7 +146,7 @@ pub fn draw_subjective_spectrum_bar(
             color,
         );
     }
-    painter.rect_stroke(bar_rect, 0.0, egui::Stroke::new(1.0, Color32::GRAY));
+    painter.rect_stroke(bar_rect, 0.0, egui::Stroke::new(1.0_f32, Color32::GRAY));
 }
 
 /// Draws the fixed spectrum gradient bar (§1.4.1) into `bar_rect`, using
@@ -167,7 +167,7 @@ pub fn draw_spectrum_bar(painter: &Painter, axes: &PlotAxes, bar_rect: Rect) {
             color,
         );
     }
-    painter.rect_stroke(bar_rect, 0.0, egui::Stroke::new(1.0, Color32::GRAY));
+    painter.rect_stroke(bar_rect, 0.0, egui::Stroke::new(1.0_f32, Color32::GRAY));
 }
 
 /// Min/max of `values` expanded by `padding_fraction` of their span, with

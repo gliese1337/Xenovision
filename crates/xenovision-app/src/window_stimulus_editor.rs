@@ -1195,7 +1195,7 @@ fn image_import_panel(ui: &mut egui::Ui, app: &mut AppState) {
                     painter.rect_stroke(
                         egui::Rect::from_two_pos(start, current),
                         0.0,
-                        egui::Stroke::new(2.0, egui::Color32::YELLOW),
+                        egui::Stroke::new(2.0_f32, egui::Color32::YELLOW),
                     );
                 }
             }
@@ -1213,7 +1213,7 @@ fn image_import_panel(ui: &mut egui::Ui, app: &mut AppState) {
                 painter.rect_stroke(
                     egui::Rect::from_two_pos(to_screen(*x0, *y0), to_screen(*x1, *y1)),
                     0.0,
-                    egui::Stroke::new(2.0, egui::Color32::GREEN),
+                    egui::Stroke::new(2.0_f32, egui::Color32::GREEN),
                 );
             }
         }
@@ -1231,7 +1231,7 @@ fn image_import_panel(ui: &mut egui::Ui, app: &mut AppState) {
                     .collect();
                 painter.add(egui::Shape::closed_line(
                     screen_points,
-                    egui::Stroke::new(2.0, egui::Color32::YELLOW),
+                    egui::Stroke::new(2.0_f32, egui::Color32::YELLOW),
                 ));
             }
             if let Some(Region::Polygon(points)) = &state.region {
@@ -1239,7 +1239,7 @@ fn image_import_panel(ui: &mut egui::Ui, app: &mut AppState) {
                     points.iter().map(|&(x, y)| to_screen(x, y)).collect();
                 painter.add(egui::Shape::closed_line(
                     screen_points,
-                    egui::Stroke::new(2.0, egui::Color32::GREEN),
+                    egui::Stroke::new(2.0_f32, egui::Color32::GREEN),
                 ));
             }
             ui.horizontal(|ui| {
