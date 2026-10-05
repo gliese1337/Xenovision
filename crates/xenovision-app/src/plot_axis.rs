@@ -1,7 +1,6 @@
 //! Shared wavelength/value <-> screen-space mapping, used by both the
-//! single-curve editor (Phase 1) and the multi-curve overlay (Phase 2) so
-//! they can't drift out of sync the way two separately-written mappings
-//! could.
+//! single-curve editor and the multi-curve overlay so they can't drift
+//! out of sync the way two separately-written mappings could.
 
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect};
 use xenovision_core::SpectralCurve;
@@ -150,8 +149,8 @@ pub fn draw_subjective_spectrum_bar(
     painter.rect_stroke(bar_rect, 0.0, egui::Stroke::new(1.0, Color32::GRAY));
 }
 
-/// Draws the fixed spectrum gradient bar into `bar_rect`, using `axes`' 
-/// horizontal wavelength mapping so it lines up with whatever is
+/// Draws the fixed spectrum gradient bar (§1.4.1) into `bar_rect`, using
+/// `axes`' horizontal wavelength mapping so it lines up with whatever is
 /// plotted above it.
 pub fn draw_spectrum_bar(painter: &Painter, axes: &PlotAxes, bar_rect: Rect) {
     let n = (bar_rect.width() / GRADIENT_STRIP_PX).ceil().max(1.0) as usize;
@@ -203,14 +202,14 @@ pub fn auto_range(
 /// x-axis. Wavelength and frequency run in opposite directions (ν = c/λ),
 /// so "long wavelength on the left" and "high frequency on the left" are
 /// the same statement, just said two ways - this makes which one a given
-/// user wants an explicit, per-preference toggle.
+/// user wants an explicit, per-preference toggle (§4.1/§6 of the GUI
+/// design doc) rather than a hardcoded choice.
 ///
 /// `IncreasingFrequency` is the default so that a freshly-added toggle
 /// changes nothing for existing users: it reduces to exactly the mapping
 /// this app used before the toggle existed (long wavelength/low
-/// frequency on the left, short wavelength/high frequency on the right -
-/// originally added per explicit request, see the removed comment this
-/// replaces).
+/// frequency on the left, short wavelength/high frequency on the right),
+/// which was itself added per explicit user request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AxisOrientation {
     /// Short wavelength (low frequency) on the left, long wavelength
@@ -363,8 +362,8 @@ mod tests {
 
     #[test]
     fn exceeds_1_1_reflectance_style_range_is_not_clipped() {
-        // Reproduces the reported bug: values up to 1.25 must not be
-        // clipped by what used to be a hardcoded VAL_MAX=1.1.
+        // The axis range is derived from the data, not a hardcoded max -
+        // values up to 1.25 must not be clipped.
         let (lo, hi) = auto_range([0.5, 1.25, 0.75].into_iter(), 0.15, 0.1, (-0.05, 1.1));
         assert!(hi > 1.25, "hi={hi} must exceed the data max");
         assert!(lo < 0.5, "lo={lo} must be below the data min");

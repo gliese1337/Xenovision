@@ -1,36 +1,20 @@
 //! Hyperspectral/multispectral image import and region extraction
-//! ENVI and GeoTIFF cubes read via GDAL, MATLAB `.mat` hypercubes
-//! read via the `matfile` crate - both validated in `spikes/spike_b`
+//! (design doc §3.4): ENVI cubes read via `envi`, GeoTIFF cubes read
+//! via `geotiff`, MATLAB `.mat` hypercubes read via the `matfile`
+//! crate, all three pure Rust with no native dependency (§10.3). One
+//! known gap: the `.mat` "1D array" heuristic needing a MATLAB-vector-
+//! shape correction, handled below.
 
 use std::path::Path;
-
-#[cfg(feature = "gdal")]
-use gdal::{Dataset, Metadata};
 
 use crate::curve::{CurveType, QuantityKind, SpectralCurve};
 
 #[derive(Debug, thiserror::Error)]
 pub enum HyperspectralError {
-    #[cfg(feature = "gdal")]
-    #[error("failed to open {path}: {source}")]
-    Open {
-        path: String,
-        #[source]
-        source: gdal::errors::GdalError,
-    },
-    #[cfg(feature = "gdal")]
-    #[error("failed to read band {band} of {path}: {source}")]
-    Read {
-        path: String,
-        band: usize,
-        #[source]
-        source: gdal::errors::GdalError,
-    },
-    #[error(
-        "can't open {path}: this build doesn't include ENVI/GeoTIFF support (GDAL). \
-         MATLAB .mat files and text/CSV import still work."
-    )]
-    GdalUnavailable { path: String },
+    #[error(transparent)]
+    Envi(#[from] crate::envi::EnviError),
+    #[error(transparent)]
+    GeoTiff(#[from] crate::geotiff::GeoTiffError),
     #[error("failed to open {path}: {source}")]
     MatIo {
         path: String,
@@ -63,9 +47,9 @@ pub enum HyperspectralError {
 /// each (ENVI's own naming for width × height, kept here since both
 /// ENVI and the `.mat` convention this module assumes are described in
 /// those terms). `wavelengths_nm` is `None` until either read from
-/// source metadata (ENVI's header, confirmed working in Spike B) or
-/// explicitly assigned (GeoTIFF's sensor-preset dropdown fallback,
-/// §3.4.1 point 2) - extraction requires it to be set.
+/// source metadata (ENVI's header) or explicitly assigned (GeoTIFF's
+/// sensor-preset dropdown fallback, §3.4.1 point 2) - extraction
+/// requires it to be set.
 pub struct HyperspectralCube {
     pub samples: usize,
     pub lines: usize,
@@ -262,6 +246,56 @@ pub fn extract_region_spectrum(cube: &HyperspectralCube, region: &Region) -> Opt
     Some(means)
 }
 
+/// Every pixel's own spectrum within `region` (the whole image if
+/// `region` is `None`), in raster order, keeping every `stride`th
+/// matching pixel (`stride.max(1)`; 1 keeps all of them) - the "entire
+/// pixel population" counterpart to `extract_region_spectrum`'s single
+/// spatial average, for building a large natural-scene corpus (§4.2.6)
+/// instead of one averaged curve. Each entry is `(line, sample,
+/// spectrum)`. Parallelized across pixels (each pixel's spectrum is an
+/// independent, strided gather across `cube`'s band-major storage).
+pub fn extract_region_pixel_spectra(
+    cube: &HyperspectralCube,
+    region: Option<&Region>,
+    stride: usize,
+) -> Vec<(usize, usize, Vec<f64>)> {
+    let indices: Vec<usize> = match region {
+        Some(r) => region_pixel_indices(cube, r),
+        None => (0..cube.lines * cube.samples).collect(),
+    };
+    let kept: Vec<usize> = indices.into_iter().step_by(stride.max(1)).collect();
+    if kept.is_empty() {
+        return Vec::new();
+    }
+
+    let chunk = kept.len().div_ceil(worker_count(kept.len()));
+    let kept_ref = &kept;
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = kept_ref
+            .chunks(chunk)
+            .map(|chunk_pixels| {
+                scope.spawn(move || {
+                    chunk_pixels
+                        .iter()
+                        .map(|&i| {
+                            let line = i / cube.samples;
+                            let sample = i % cube.samples;
+                            let spectrum: Vec<f64> = (0..cube.bands)
+                                .map(|b| cube.pixel(line, sample, b) as f64)
+                                .collect();
+                            (line, sample, spectrum)
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("pixel spectra thread panicked"))
+            .collect()
+    })
+}
+
 /// Builds the extracted, auto-labeled Spectral Curve for one region
 /// (§3.4.2's output + §5.2's "same mechanism, tagged Illumination"
 /// variant as a labeling choice). `None` if the region matched no
@@ -306,6 +340,43 @@ pub fn extracted_curve(
     Some(curve)
 }
 
+/// Builds one pixel's auto-labeled, auto-tagged Spectral Curve from an
+/// `extract_region_pixel_spectra` entry (§4.2.6's bulk corpus-building
+/// tool): tagged `Radiance{unit:"relative"}` - a raw per-pixel sensor
+/// value is radiance, not pre-normalized reflectance, which is what
+/// makes a later bulk radiance→reflectance conversion (against a shared
+/// luminant) meaningful on the result - and tagged in `metadata["batch"]`
+/// with `batch_label` so callers can group thousands of these together
+/// instead of listing them individually. `None` if the cube has no
+/// wavelength axis assigned yet.
+pub fn pixel_curve(
+    cube: &HyperspectralCube,
+    line: usize,
+    sample: usize,
+    spectrum: &[f64],
+    batch_label: &str,
+) -> Option<SpectralCurve> {
+    let wavelengths = cube.wavelengths_nm.as_ref()?;
+    let points: Vec<(f64, f64)> = wavelengths
+        .iter()
+        .zip(spectrum.iter())
+        .map(|(&wl, &v)| (wl, v))
+        .collect();
+    let name = format!("{} — pixel ({line},{sample})", cube.source_label);
+    // Same (CurveType::Illumination, Radiance) pairing extracted_curve's
+    // own as_illumination=true branch uses - a raw per-pixel sensor
+    // value is a radiance sample, not pre-normalized reflectance.
+    let mut curve = SpectralCurve::new(name, CurveType::Illumination)
+        .with_points(points)
+        .with_quantity(QuantityKind::Radiance {
+            unit: "relative".to_string(),
+        });
+    curve
+        .metadata
+        .insert("batch".to_string(), batch_label.to_string());
+    Some(curve)
+}
+
 fn source_label_for(path: &Path) -> String {
     path.file_stem()
         .and_then(|s| s.to_str())
@@ -313,93 +384,48 @@ fn source_label_for(path: &Path) -> String {
         .to_string()
 }
 
-/// Opens an ENVI or GeoTIFF file via GDAL (format auto-detected by
-/// GDAL itself) and reads every band into a `HyperspectralCube`,
-/// pulling `wavelength = ...` header metadata into `wavelengths_nm`
-/// when every band has it (ENVI; confirmed working in Spike B) and
-/// leaving it `None` otherwise (GeoTIFF's typical case, per Spike B).
-#[cfg(feature = "gdal")]
+/// Opens an ENVI or GeoTIFF file (format picked by `path`'s extension -
+/// `.tif`/`.tiff` is GeoTIFF, anything else is treated as ENVI, whose
+/// own loader accepts either half of the header/data pair) and reads
+/// every band into a `HyperspectralCube`. Pulls per-band `wavelength =
+/// ...` header metadata into `wavelengths_nm` for ENVI when every band
+/// has it; GeoTIFF never has wavelength metadata (baseline TIFF has no
+/// such convention), so it's always `None` there.
 pub fn load_envi_or_geotiff(
     path: impl AsRef<Path>,
 ) -> Result<HyperspectralCube, HyperspectralError> {
     let path = path.as_ref();
-    let path_str = path.display().to_string();
-    let dataset = Dataset::open(path).map_err(|source| HyperspectralError::Open {
-        path: path_str.clone(),
-        source,
-    })?;
-    let (samples, lines) = dataset.raster_size();
-    let bands = dataset.raster_count();
+    let is_tiff = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("tif") || e.eq_ignore_ascii_case("tiff"));
 
-    let mut data = vec![0.0_f32; samples * lines * bands];
-    let mut per_band_wavelength: Vec<Option<f64>> = Vec::with_capacity(bands);
-    for b in 1..=bands {
-        let band = dataset
-            .rasterband(b)
-            .map_err(|source| HyperspectralError::Read {
-                path: path_str.clone(),
-                band: b,
-                source,
-            })?;
-        let buf = band
-            .read_as::<f32>((0, 0), (samples, lines), (samples, lines), None)
-            .map_err(|source| HyperspectralError::Read {
-                path: path_str.clone(),
-                band: b,
-                source,
-            })?;
-        let dest_start = (b - 1) * lines * samples;
-        data[dest_start..dest_start + lines * samples].copy_from_slice(buf.data());
-
-        let wavelength = band
-            .metadata_domain("")
-            .unwrap_or_default()
-            .iter()
-            .find_map(|item| {
-                item.strip_prefix("wavelength=")
-                    .and_then(|v| v.trim().parse::<f64>().ok())
-            });
-        per_band_wavelength.push(wavelength);
-    }
-    let wavelengths_nm = if per_band_wavelength.iter().all(Option::is_some) {
-        Some(
-            per_band_wavelength
-                .into_iter()
-                .map(Option::unwrap)
-                .collect(),
-        )
+    if is_tiff {
+        let cube = crate::geotiff::load_geotiff(path)?;
+        Ok(HyperspectralCube {
+            samples: cube.samples,
+            lines: cube.lines,
+            bands: cube.bands,
+            wavelengths_nm: None,
+            data: cube.data,
+            source_label: source_label_for(path),
+        })
     } else {
-        None
-    };
-
-    Ok(HyperspectralCube {
-        samples,
-        lines,
-        bands,
-        wavelengths_nm,
-        data,
-        source_label: source_label_for(path),
-    })
+        let cube = crate::envi::load_envi(path)?;
+        Ok(HyperspectralCube {
+            samples: cube.samples,
+            lines: cube.lines,
+            bands: cube.bands,
+            wavelengths_nm: cube.wavelengths_nm,
+            data: cube.data,
+            source_label: source_label_for(path),
+        })
+    }
 }
-
-/// Without the `gdal` feature, ENVI/GeoTIFF can't be read; this explains
-/// why instead of the app silently lacking the option.
-#[cfg(not(feature = "gdal"))]
-pub fn load_envi_or_geotiff(
-    path: impl AsRef<Path>,
-) -> Result<HyperspectralCube, HyperspectralError> {
-    Err(HyperspectralError::GdalUnavailable {
-        path: path.as_ref().display().to_string(),
-    })
-}
-
-/// Whether this build can read ENVI/GeoTIFF files (the `gdal` feature).
-pub const GDAL_AVAILABLE: bool = cfg!(feature = "gdal");
 
 /// One variable found in a `.mat` file: its name and shape, as reported
-/// by `matfile` (which - per Spike B - only ever lists variables of
-/// supported, decodable types; non-numeric variables are silently
-/// absent rather than erroring).
+/// by `matfile` (which only ever lists variables of supported,
+/// decodable types; non-numeric variables are silently absent rather
+/// than erroring).
 pub struct MatVariableInfo {
     pub name: String,
     pub shape: Vec<usize>,
@@ -430,9 +456,9 @@ pub fn list_mat_variables(
 
 /// The §3.4.1 point 3 shape-heuristic auto-guess, pre-filling the
 /// confirmation dropdown: a 3D array is proposed as the cube, and -
-/// corrected per Spike B's finding that MATLAB has no true 1D arrays -
-/// a 2D array with one dimension `== 1` and the other matching the
-/// cube's band count is proposed as the wavelength vector.
+/// since MATLAB has no true 1D arrays - a 2D array with one dimension
+/// `== 1` and the other matching the cube's band count is proposed as
+/// the wavelength vector.
 pub struct MatGuess {
     pub cube_name: Option<String>,
     pub wavelength_name: Option<String>,
@@ -633,6 +659,94 @@ mod tests {
         assert_eq!(extract_region_spectrum(&cube, &region), None);
     }
 
+    #[test]
+    fn pixel_spectra_stride_one_covers_every_pixel_in_region_exactly_once() {
+        let cube = tiny_cube();
+        let region = Region::Rectangle {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 2.0,
+            y1: 2.0,
+        };
+        let mut pixels = extract_region_pixel_spectra(&cube, Some(&region), 1);
+        pixels.sort_by_key(|&(line, sample, _)| (line, sample));
+        assert_eq!(pixels.len(), 4);
+        for (line, sample, spectrum) in &pixels {
+            let expected: Vec<f64> = (0..3)
+                .map(|b| cube.pixel(*line, *sample, b) as f64)
+                .collect();
+            assert_eq!(spectrum, &expected);
+        }
+    }
+
+    #[test]
+    fn pixel_spectra_none_region_matches_whole_image() {
+        let cube = tiny_cube();
+        let whole = extract_region_pixel_spectra(&cube, None, 1);
+        let rect = extract_region_pixel_spectra(
+            &cube,
+            Some(&Region::Rectangle {
+                x0: 0.0,
+                y0: 0.0,
+                x1: cube.samples as f64,
+                y1: cube.lines as f64,
+            }),
+            1,
+        );
+        let sort = |mut v: Vec<(usize, usize, Vec<f64>)>| {
+            v.sort_by_key(|&(l, s, _)| (l, s));
+            v
+        };
+        assert_eq!(sort(whole), sort(rect));
+    }
+
+    #[test]
+    fn pixel_spectra_stride_keeps_every_nth_matching_pixel() {
+        let cube = tiny_cube(); // 4 pixels total
+        let every_pixel = extract_region_pixel_spectra(&cube, None, 1);
+        let every_other = extract_region_pixel_spectra(&cube, None, 2);
+        assert_eq!(every_pixel.len(), 4);
+        assert_eq!(every_other.len(), 2);
+    }
+
+    #[test]
+    fn pixel_spectra_empty_region_is_empty() {
+        let cube = tiny_cube();
+        let region = Region::Rectangle {
+            x0: 50.0,
+            y0: 50.0,
+            x1: 60.0,
+            y1: 60.0,
+        };
+        assert!(extract_region_pixel_spectra(&cube, Some(&region), 1).is_empty());
+    }
+
+    #[test]
+    fn pixel_curve_is_radiance_tagged_and_carries_batch_label() {
+        let cube = tiny_cube();
+        let spectrum = vec![1.0, 101.0, 201.0];
+        let curve = pixel_curve(&cube, 0, 1, &spectrum, "test image — whole image").unwrap();
+        assert_eq!(curve.curve_type, CurveType::Illumination);
+        assert_eq!(
+            curve.quantity,
+            QuantityKind::Radiance {
+                unit: "relative".to_string()
+            }
+        );
+        assert_eq!(curve.points, vec![(400.0, 1.0), (500.0, 101.0), (600.0, 201.0)]);
+        assert_eq!(
+            curve.metadata.get("batch").map(String::as_str),
+            Some("test image — whole image")
+        );
+    }
+
+    #[test]
+    fn pixel_curve_none_without_wavelength_axis() {
+        let mut cube = tiny_cube();
+        cube.wavelengths_nm = None;
+        assert!(pixel_curve(&cube, 0, 0, &[1.0, 2.0, 3.0], "batch").is_none());
+    }
+
     /// The original per-pixel extraction loop, kept as a reference.
     fn extract_reference(cube: &HyperspectralCube, region: &Region) -> Option<Vec<f64>> {
         let mut sums = vec![0.0_f64; cube.bands];
@@ -799,23 +913,11 @@ mod tests {
         assert_eq!(guess.wavelength_name, None);
     }
 
-    /// End-to-end against a GDAL-written ENVI file, mirroring
-    /// Spike B's own probe but as a proper regression test: confirms
-    /// `load_envi_or_geotiff` extracts dimensions, per-band wavelength
-    /// metadata, and pixel data correctly through this module's actual
-    /// (non-spike) code path.
-    #[cfg(not(feature = "gdal"))]
-    #[test]
-    fn without_gdal_envi_geotiff_load_reports_why() {
-        const { assert!(!GDAL_AVAILABLE) };
-        let Err(err) = load_envi_or_geotiff("/tmp/some_image.hdr") else {
-            panic!("loading must fail without GDAL");
-        };
-        assert!(matches!(err, HyperspectralError::GdalUnavailable { .. }));
-        assert!(err.to_string().contains("GDAL"));
-    }
-
-    #[cfg(feature = "gdal")]
+    /// End-to-end through `load_envi_or_geotiff`'s own extension-based
+    /// dispatch (not `envi::load_envi` directly, which has its own,
+    /// more thorough tests): confirms a `.dat`-extension path is routed
+    /// to the ENVI reader and comes back with dimensions, per-band
+    /// wavelength metadata, and pixel data intact.
     #[test]
     fn load_envi_or_geotiff_reads_a_real_envi_file_correctly() {
         let dir = std::env::temp_dir().join(format!(
@@ -860,12 +962,11 @@ mod tests {
         std::fs::remove_dir(&dir).ok();
     }
 
-    /// Mirrors the ENVI test above, but for GeoTIFF: writes a
-    /// multiband GeoTIFF via GDAL's own GTiff driver, then confirms
-    /// `load_envi_or_geotiff` reads the pixel data back correctly and -
-    /// since this file carries no wavelength tags - leaves
-    /// `wavelengths_nm` at `None` rather than fabricating one.
-    #[cfg(feature = "gdal")]
+    /// Mirrors the ENVI test above, but for GeoTIFF: confirms a
+    /// `.tif`-extension path is routed to the GeoTIFF reader
+    /// (`geotiff::load_geotiff`, whose own tests separately confirm
+    /// compatibility with real GDAL-written files) and comes back with
+    /// pixel data intact and no fabricated wavelength metadata.
     #[test]
     fn load_envi_or_geotiff_reads_a_real_geotiff_file_correctly() {
         let dir = std::env::temp_dir().join(format!(
@@ -878,22 +979,8 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sample.tif");
-
         let (samples, lines, bands) = (3_usize, 2_usize, 4_usize);
-        {
-            let driver = gdal::DriverManager::get_driver_by_name("GTiff").unwrap();
-            let dataset = driver
-                .create_with_band_type::<f32, _>(&path, samples, lines, bands)
-                .unwrap();
-            for b in 1..=bands {
-                let mut band = dataset.rasterband(b).unwrap();
-                let pixel_data: Vec<f32> = (0..lines * samples)
-                    .map(|i| ((b - 1) * 100 + i) as f32)
-                    .collect();
-                let mut buffer = gdal::raster::Buffer::new((samples, lines), pixel_data);
-                band.write((0, 0), (samples, lines), &mut buffer).unwrap();
-            }
-        }
+        crate::geotiff::write_minimal_tiff(&path, samples, lines, bands);
 
         let cube = load_envi_or_geotiff(&path).unwrap();
         assert_eq!((cube.samples, cube.lines, cube.bands), (3, 2, 4));
@@ -901,7 +988,7 @@ mod tests {
             cube.wavelengths_nm, None,
             "GeoTIFF has no wavelength tags here"
         );
-        assert_eq!(cube.pixel(1, 2, 3), 305.0); // band 4 (0-based 3): 300 + line*samples+sample = 300+1*3+2
+        assert_eq!(cube.pixel(1, 2, 3), 312.0); // band 3, line 1, sample 2
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();

@@ -1,6 +1,6 @@
 //! Generic load/save for user-editable preset libraries (illuminant
-//! notch/narrow-band-source presets for now; Phase 6/8's species fixture
-//! files will reuse the same `data_dir` convention per §8.3).
+//! notch/narrow-band-source presets for now; species fixture files reuse
+//! the same `data_dir` convention per §8.3).
 //!
 //! Presets are stored as plain JSON files in the OS-appropriate per-user
 //! data directory, editable by hand outside the app too (consistent with
@@ -78,7 +78,7 @@ mod tests {
     }
 
     /// Isolates each test to its own filename so parallel test execution
-    /// against the real (shared) data_dir() doesn't race.
+    /// against the shared `data_dir()` doesn't race.
     fn unique_filename(label: &str) -> String {
         format!(
             "test-{label}-{}-{}.json",

@@ -1,5 +1,5 @@
 //! Thin egui-flavored wrapper around `xenovision_core::gradient` (the
-//! canonical implementation).
+//! canonical implementation, shared with §1.4.2's curve-coloring fallback).
 
 use egui::Color32;
 

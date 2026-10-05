@@ -4,11 +4,14 @@
 
 use eframe::egui;
 use xenovision_core::curve_set::OpponentContrast;
-use xenovision_core::{fixture_library, CurveType, SpectralCurve};
+use xenovision_core::{natural_opponent, fixture_library, CurveType, QuantityKind, SpectralCurve};
 
 use crate::multi_curve_editor;
 use crate::plot_axis::{self, AxisOrientation};
-use crate::state::{AppCurveSet, AppState, CurveListTab, CurveSetId};
+use crate::state::{AppCurveSet, AppState, CurveId, CurveListTab, CurveSetId, NaturalSceneMode};
+use crate::stimulus_picker;
+
+const STEP_NM: f64 = 1.0;
 
 fn display_color(curve: &SpectralCurve) -> egui::Color32 {
     xenovision_core::cie::curve_display_color(curve)
@@ -420,9 +423,9 @@ fn left_rail(ui: &mut egui::Ui, app: &mut AppState, set_id: CurveSetId) {
 
     // Which graph (colorspace vs. isolated) the center pane shows is
     // settable here directly, independent of selecting any particular
-    // curve - needed now that "no curve selected" is a valid state (you
-    // can't rely on clicking a curve to pick the mode when there isn't
-    // one to click yet, e.g. an empty isolated-curve list).
+    // curve - needed now that "no curve selected" is a state in its own
+    // right (you can't rely on clicking a curve to pick the mode when
+    // there isn't one to click yet, e.g. an empty isolated-curve list).
     ui.horizontal(|ui| {
         if ui
             .selectable_label(current_curve_tab == CurveListTab::Colorspace, "Colorspace")
@@ -526,11 +529,10 @@ fn toggle_select_curve(app: &mut AppState, set_id: CurveSetId, curve_id: u64, ta
 }
 
 /// Workspace only ever creates receptor (Sensitivity) curves - a visual
-/// system's own defining data. This used to also offer stimulus curves
-/// and luminant generators here, which blurred the line this app now
-/// draws between "a visual system" (edited here) and "something to
-/// measure with one" (reflectance/radiance curves, edited in the
-/// Stimulus Editor window instead, which also owns the generators).
+/// system's own defining data - keeping a clean line between "a visual
+/// system" (edited here) and "something to measure with one"
+/// (reflectance/radiance curves, edited in the Stimulus Editor window
+/// instead, which also owns the generators).
 fn new_curve_menu(ui: &mut egui::Ui, app: &mut AppState, set_id: CurveSetId) {
     if ui.button("+ New Curve").clicked() {
         add_curve(
@@ -781,8 +783,6 @@ fn isolated_editor(
 /// only if something actually changed - this is what makes a graph
 /// edit in Workspace invalidate `TransformCache` and show up in an
 /// already-open Comparison window on its next repaint (design doc §3).
-/// A prior version of this write-back never bumped `revision` at all,
-/// so dragged points silently never invalidated the cache.
 fn write_back_curves(
     app: &mut AppState,
     set_id: CurveSetId,
@@ -883,6 +883,201 @@ fn opponent_contrast_strip(ui: &mut egui::Ui, app: &mut AppState, set_id: CurveS
         {
             set.opponent_contrasts.clear();
             set.revision += 1;
+        }
+    });
+
+    natural_scene_generator(ui, app, set_id);
+}
+
+/// The "auto-generate from natural-scene statistics" control (§4.2.6):
+/// derives `opponent_contrasts` from the receptor-response covariance of
+/// either a parametric smoothness model or a user-picked weighted corpus
+/// from the shared stimulus library, replacing the table above outright
+/// on click (no confirmation - same precedent as "Clear all", and the
+/// per-tab undo history already makes this one reversible step).
+fn natural_scene_generator(ui: &mut egui::Ui, app: &mut AppState, set_id: CurveSetId) {
+    ui.separator();
+    ui.collapsing("Auto-generate from natural-scene statistics", |ui| {
+        let Some(tab_ui) = app.workspace.per_tab.get(&set_id) else {
+            return;
+        };
+        let mut mode = tab_ui.natural_scene.mode;
+        let mut illuminant = tab_ui.natural_scene.illuminant;
+        let mut correlation_length_nm = tab_ui.natural_scene.correlation_length_nm;
+        let mut corpus_weights = tab_ui.natural_scene.corpus_weights.clone();
+        let mut shared_weight_buf = tab_ui.natural_scene.corpus_shared_weight;
+        let mut status = tab_ui.natural_scene.status.clone();
+
+        ui.label(
+            "Derives this set's opponent contrasts from the receptor-response covariance of \
+             a \"natural scene\" ensemble - the empirical basis for human L-M/S-(L+M) \
+             (Buchsbaum & Gottschalk 1983; Ruderman, Cronin & Chiao 1998; Wachtler, Lee & \
+             Sejnowski 2001) - instead of only literature pairings or manual entry.",
+        );
+
+        ui.horizontal(|ui| {
+            ui.label("Ensemble:");
+            ui.selectable_value(&mut mode, NaturalSceneMode::Parametric, "Parametric model");
+            ui.selectable_value(&mut mode, NaturalSceneMode::Corpus, "Custom corpus");
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Illuminant:");
+            let name = illuminant
+                .and_then(|id| app.luminants.get(&id))
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "(choose one)".to_string());
+            egui::ComboBox::from_id_salt(("natural_scene_illuminant", set_id))
+                .selected_text(name)
+                .show_ui(ui, |ui| {
+                    for &id in &app.luminant_order {
+                        if let Some(curve) = app.luminants.get(&id) {
+                            if ui.selectable_label(illuminant == Some(id), &curve.name).clicked() {
+                                illuminant = Some(id);
+                            }
+                        }
+                    }
+                });
+        });
+
+        match mode {
+            NaturalSceneMode::Parametric => {
+                ui.horizontal(|ui| {
+                    ui.label("Correlation length (nm):");
+                    ui.add(
+                        egui::DragValue::new(&mut correlation_length_nm)
+                            .range(1.0..=500.0)
+                            .speed(1.0),
+                    )
+                    .on_hover_text(
+                        "How smoothly natural reflectance spectra are assumed to vary with \
+                         wavelength (Maloney 1986) - a tunable approximation, not a measured \
+                         constant.",
+                    );
+                });
+            }
+            NaturalSceneMode::Corpus => {
+                ui.label(
+                    "Select reflectance/radiance curves (or whole corpora/sub-corpora, \
+                     organized in the Stimulus Editor) to use as the corpus:",
+                );
+                let eligible_kind = |c: &SpectralCurve| {
+                    !matches!(
+                        c.quantity,
+                        QuantityKind::Absorption | QuantityKind::Sensitivity
+                    )
+                };
+                let tree = stimulus_picker::corpus_tree(app, &eligible_kind);
+                let is_included = |id: CurveId| corpus_weights.contains_key(&id);
+                let mut toggled: Vec<(CurveId, bool)> = Vec::new();
+                let mut on_toggle = |ids: &[CurveId], included: bool| {
+                    toggled.extend(ids.iter().map(|&id| (id, included)));
+                };
+                stimulus_picker::render_corpus_checklist(ui, &tree, &is_included, &mut on_toggle);
+                for (id, included) in toggled {
+                    if included {
+                        corpus_weights.insert(id, 1.0);
+                    } else {
+                        corpus_weights.remove(&id);
+                    }
+                }
+
+                if corpus_weights.len() < 2 {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 180, 40),
+                        "Select at least 2 curves with positive weight.",
+                    );
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{} curve(s) selected. Apply weight:", corpus_weights.len()));
+                        ui.add(
+                            egui::DragValue::new(&mut shared_weight_buf)
+                                .speed(0.1)
+                                .range(0.0..=f64::MAX),
+                        );
+                        if ui.button("Apply to all selected").clicked() {
+                            for w in corpus_weights.values_mut() {
+                                *w = shared_weight_buf;
+                            }
+                        }
+                    });
+                }
+            }
+        }
+
+        let can_generate = illuminant.is_some()
+            && (mode == NaturalSceneMode::Parametric || corpus_weights.len() >= 2);
+        if ui
+            .add_enabled(can_generate, egui::Button::new("Generate"))
+            .clicked()
+        {
+            if let Some(illum_curve) = illuminant.and_then(|id| app.luminants.get(&id).cloned()) {
+                let colorspace_curves: Vec<SpectralCurve> = app
+                    .curve_sets
+                    .get(&set_id)
+                    .map(|s| {
+                        s.colorspace_curves
+                            .iter()
+                            .map(|id| s.curves[id].clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let result = match mode {
+                    NaturalSceneMode::Parametric => Some(natural_opponent::derive_from_parametric_model(
+                        &colorspace_curves,
+                        &illum_curve,
+                        correlation_length_nm,
+                        STEP_NM,
+                    )),
+                    NaturalSceneMode::Corpus => {
+                        let entries: Vec<natural_opponent::CorpusEntry> = corpus_weights
+                            .iter()
+                            .filter_map(|(id, &weight)| {
+                                app.stimulus_curves
+                                    .get(id)
+                                    .map(|e| natural_opponent::CorpusEntry {
+                                        curve: &e.curve,
+                                        weight,
+                                    })
+                            })
+                            .collect();
+                        natural_opponent::derive_from_corpus(
+                            &colorspace_curves,
+                            &illum_curve,
+                            &entries,
+                            STEP_NM,
+                        )
+                    }
+                };
+                match result {
+                    Some(contrasts) => {
+                        let n = contrasts.len();
+                        if let Some(set) = app.curve_sets.get_mut(&set_id) {
+                            set.opponent_contrasts = contrasts;
+                            set.revision += 1;
+                            set.dirty = true;
+                        }
+                        status = format!("Generated {n} contrast(s).");
+                    }
+                    None => {
+                        status = "Not enough corpus data to generate (need >= 2 entries with \
+                                   positive total weight)."
+                            .to_string();
+                    }
+                }
+            }
+        }
+        if !status.is_empty() {
+            ui.label(&status);
+        }
+
+        if let Some(tab_ui) = app.workspace.per_tab.get_mut(&set_id) {
+            tab_ui.natural_scene.mode = mode;
+            tab_ui.natural_scene.illuminant = illuminant;
+            tab_ui.natural_scene.correlation_length_nm = correlation_length_nm;
+            tab_ui.natural_scene.corpus_weights = corpus_weights;
+            tab_ui.natural_scene.corpus_shared_weight = shared_weight_buf;
+            tab_ui.natural_scene.status = status;
         }
     });
 }
@@ -1006,12 +1201,12 @@ fn right_inspector(ui: &mut egui::Ui, app: &mut AppState, set_id: CurveSetId) {
     validation_flags(ui, app, set_id);
 }
 
-/// Just the curve's name - the inspector used to also show a full
-/// wavelength/value point table here, but with more than a handful of
-/// points it overwhelmed the whole panel. Points are still fully
-/// editable directly on the graph in the center pane (drag to move,
-/// double-click empty space to add, right-click or Delete to remove) -
-/// this field is for the one thing the graph itself has no gesture for.
+/// Just the curve's name - a full wavelength/value point table here
+/// would overwhelm the panel once a curve has more than a handful of
+/// points. Points are still fully editable directly on the graph in the
+/// center pane (drag to move, double-click empty space to add,
+/// right-click or Delete to remove) - this field is for the one thing
+/// the graph itself has no gesture for.
 fn curve_name_field(ui: &mut egui::Ui, app: &mut AppState, set_id: CurveSetId, curve_id: u64) {
     let Some(set) = app.curve_sets.get_mut(&set_id) else {
         return;

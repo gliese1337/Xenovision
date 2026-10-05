@@ -13,10 +13,10 @@ use crate::linalg::{self, dot, norm};
 /// curve as zero outside its own domain.
 ///
 /// Note: treating a curve as exactly zero just past its last point creates
-/// a hard discontinuity there if the curve's real value doesn't already
+/// a hard discontinuity there if the curve's value doesn't already
 /// taper to ~zero by that point. Trapezoidal integration smooths across
 /// that discontinuity (half of one `step_nm`-wide "phantom" triangle per
-/// edge), which is negligible for real sensitivity/illuminant curves
+/// edge), which is negligible for ordinary sensitivity/illuminant curves
 /// (they taper off before truncation) but matters for an artificially
 /// sharp-edged test curve - see the box-function test below, which uses a
 /// small `step_nm` specifically to keep that bias below its tolerance.
@@ -330,7 +330,7 @@ mod tests {
             .with_points(vec![(150.0, 3.0), (250.0, 3.0)]);
         // A fine step keeps the (expected, see integrate_product's doc
         // comment) domain-edge discretization bias well below tolerance;
-        // real curves taper to ~zero before truncation so don't need this.
+        // ordinary curves taper to ~zero before truncation so don't need this.
         let q = integrate_product(&s, &i, 0.01);
         assert!((q - 300.0).abs() < 0.1, "q={q}");
     }
@@ -588,8 +588,8 @@ mod tests {
         assert_eq!(coords.adapted_activations, direct);
     }
 
-    /// Phase 9's (§7.2) "test at a higher N" exit criterion, through the
-    /// real end-to-end pipeline rather than just `build_chroma_axes`'s
+    /// §7.2's "test at a higher N" exit criterion, through the
+    /// end-to-end pipeline rather than just `build_chroma_axes`'s
     /// shape check above - an N=8 custom-style system (no species-
     /// specific code, same generic `Pipeline::build` every fixture uses)
     /// must still produce a correct, finite result.

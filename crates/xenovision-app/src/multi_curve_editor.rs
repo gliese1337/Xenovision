@@ -5,17 +5,16 @@
 //! read-only `multi_curve_view`); the legend row beneath is the *only*
 //! way to change which curve is selected for editing - clicking or
 //! dragging on the plot itself only ever acts on the already-selected
-//! curve's own points, never retargets the selection. An earlier
-//! version hit-tested every curve's points for interaction (even though
-//! only the selected curve's points were drawn, per the note below),
-//! which meant clicking near an invisible point belonging to a
-//! different curve could silently switch which curve you were editing
-//! mid-drag.
+//! curve's own points, never retargets the selection: hit-testing every
+//! curve's points instead (even though only the selected curve's points
+//! are drawn, per the note below) would let a click near an invisible
+//! point belonging to a different curve silently switch which curve
+//! you're editing mid-drag.
 //!
 //! `selected_curve` is an `Option<usize>` rather than a plain index so
-//! "no curve selected" is a valid state (clicking the already-selected
-//! curve's legend entry toggles back to it) - with nothing selected,
-//! no points are drawn or hit-testable at all.
+//! "no curve selected" is a representable state (clicking the
+//! already-selected curve's legend entry toggles back to it) - with
+//! nothing selected, no points are drawn or hit-testable at all.
 //!
 //! Interaction is handled *before* anything is drawn, specifically so a
 //! drag's effect on a curve's shape - and therefore its CIE-derived
@@ -85,8 +84,11 @@ pub fn multi_curve_editor(
         }
     }
 
-    // Fills the full width of whatever container it's placed in
-    // (currently in the Workspace window's center pane)
+    // Fills the full width of whatever container it's placed in (now
+    // the Workspace window's center pane) rather than capping at a
+    // fixed pixel width - the cap made no sense once this widget had an
+    // independently resizable column to itself instead of sharing a
+    // single scrolling page with everything else.
     let desired_size = Vec2::new(ui.available_width(), 360.0);
     let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
     #[cfg(test)]

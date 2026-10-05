@@ -129,6 +129,84 @@ impl Mat {
     }
 }
 
+/// Eigendecomposition of a symmetric NxN matrix via the classical cyclic
+/// Jacobi algorithm (repeatedly zeroing one off-diagonal pair with a
+/// rotation, sweeping over every `i < j` pair, until the off-diagonal
+/// mass is negligible). Converges quadratically and needs only a handful
+/// of sweeps for the small N this app deals with (receptor counts are
+/// single digits in practice, soft-capped per §7.2) - simple, auditable,
+/// and avoids pulling in an external linalg crate, matching this
+/// module's existing Gauss-Jordan-inverse philosophy.
+///
+/// Returns `(eigenvalues, eigenvectors)`, both sorted by descending
+/// eigenvalue; `eigenvectors[k]` is the unit eigenvector for
+/// `eigenvalues[k]`. Eigenvector sign is whatever the rotations happen to
+/// produce (both `v` and `-v` are valid) - callers that need a
+/// deterministic sign should canonicalize it themselves.
+pub fn symmetric_eigen(m: &Mat) -> (Vec<f64>, Vec<Vec<f64>>) {
+    let n = m.n;
+    if n == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let mut a = m.clone();
+    let mut v = Mat::identity(n);
+    const MAX_SWEEPS: usize = 100;
+
+    for _ in 0..MAX_SWEEPS {
+        let off_diag_sq: f64 = (0..n)
+            .flat_map(|i| (i + 1..n).map(move |j| (i, j)))
+            .map(|(i, j)| a.get(i, j) * a.get(i, j))
+            .sum();
+        if off_diag_sq < 1e-20 {
+            break;
+        }
+        for p in 0..n {
+            for q in p + 1..n {
+                let apq = a.get(p, q);
+                if apq.abs() < 1e-300 {
+                    continue;
+                }
+                let app = a.get(p, p);
+                let aqq = a.get(q, q);
+                // Standard Jacobi rotation angle, via the numerically
+                // stable half-angle form rather than atan(2*apq/(app-aqq)).
+                let theta = (aqq - app) / (2.0 * apq);
+                let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
+                let c = 1.0 / (t * t + 1.0).sqrt();
+                let s = t * c;
+
+                for k in 0..n {
+                    let akp = a.get(k, p);
+                    let akq = a.get(k, q);
+                    a.set(k, p, c * akp - s * akq);
+                    a.set(k, q, s * akp + c * akq);
+                }
+                for k in 0..n {
+                    let apk = a.get(p, k);
+                    let aqk = a.get(q, k);
+                    a.set(p, k, c * apk - s * aqk);
+                    a.set(q, k, s * apk + c * aqk);
+                }
+                for k in 0..n {
+                    let vkp = v.get(k, p);
+                    let vkq = v.get(k, q);
+                    v.set(k, p, c * vkp - s * vkq);
+                    v.set(k, q, s * vkp + c * vkq);
+                }
+            }
+        }
+    }
+
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&i, &j| a.get(j, j).partial_cmp(&a.get(i, i)).unwrap());
+    let eigenvalues = order.iter().map(|&i| a.get(i, i)).collect();
+    let eigenvectors = order
+        .iter()
+        .map(|&i| (0..n).map(|k| v.get(k, i)).collect())
+        .collect();
+    (eigenvalues, eigenvectors)
+}
+
 pub fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
@@ -216,6 +294,77 @@ mod tests {
         let m = Mat::from_rows(&[vec![1.0, 2.0], vec![3.0, 4.0]]);
         let v = m.mul_vec(&[5.0, 6.0]);
         assert_eq!(v, vec![1.0 * 5.0 + 2.0 * 6.0, 3.0 * 5.0 + 4.0 * 6.0]);
+    }
+
+    #[test]
+    fn symmetric_eigen_of_diagonal_matrix_is_itself() {
+        let m = Mat::from_rows(&[
+            vec![5.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 3.0],
+        ]);
+        let (vals, vecs) = symmetric_eigen(&m);
+        assert_eq!(vals, vec![5.0, 3.0, 1.0]);
+        // Each eigenvector should be a standard basis vector (up to sign).
+        for v in &vecs {
+            let nonzero = v.iter().filter(|x| x.abs() > 1e-9).count();
+            assert_eq!(nonzero, 1, "{v:?} isn't a basis vector");
+        }
+    }
+
+    #[test]
+    fn symmetric_eigen_hand_computed_2x2() {
+        // [[2,1],[1,2]] has eigenvalues 3 and 1, eigenvectors (1,1)/sqrt2
+        // and (1,-1)/sqrt2 (up to sign/order).
+        let m = Mat::from_rows(&[vec![2.0, 1.0], vec![1.0, 2.0]]);
+        let (vals, _vecs) = symmetric_eigen(&m);
+        assert!((vals[0] - 3.0).abs() < 1e-9);
+        assert!((vals[1] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn symmetric_eigen_satisfies_mv_eq_lambda_v_and_is_orthonormal() {
+        let cases = [
+            Mat::from_rows(&[vec![4.0, 1.0, 0.0], vec![1.0, 3.0, 1.0], vec![0.0, 1.0, 2.0]]),
+            Mat::from_rows(&[
+                vec![2.0, -1.0, 0.5, 0.0],
+                vec![-1.0, 3.0, 0.2, 0.1],
+                vec![0.5, 0.2, 1.5, -0.3],
+                vec![0.0, 0.1, -0.3, 4.0],
+            ]),
+        ];
+        for m in cases {
+            let n = m.n;
+            let (vals, vecs) = symmetric_eigen(&m);
+            for k in 0..n {
+                let mv = m.mul_vec(&vecs[k]);
+                for i in 0..n {
+                    assert!(
+                        (mv[i] - vals[k] * vecs[k][i]).abs() < 1e-7,
+                        "M*v != lambda*v at eigenvector {k}, component {i}"
+                    );
+                }
+                assert!((norm(&vecs[k]) - 1.0).abs() < 1e-9, "eigenvector not unit norm");
+            }
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    assert!(
+                        dot(&vecs[i], &vecs[j]).abs() < 1e-7,
+                        "eigenvectors {i},{j} not orthogonal"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn symmetric_eigen_n_zero_and_n_one() {
+        let (vals, vecs) = symmetric_eigen(&Mat::zeros(0));
+        assert!(vals.is_empty() && vecs.is_empty());
+        let (vals, vecs) = symmetric_eigen(&Mat::from_rows(&[vec![7.0]]));
+        assert_eq!(vals, vec![7.0]);
+        assert_eq!(vecs.len(), 1);
+        assert!((vecs[0][0].abs() - 1.0).abs() < 1e-9);
     }
 
     #[test]

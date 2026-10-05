@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn missing_noise_fields_in_json_default_to_none_not_an_error() {
-        // Confirms old saved files (without these Phase 4 fields) still load.
+        // Confirms old saved files (without these newer noise fields) still load.
         let json = r#"{"name":"x","curve_type":"sensitivity","points":[]}"#;
         let curve: SpectralCurve = serde_json::from_str(json).unwrap();
         assert_eq!(curve.omega, None);

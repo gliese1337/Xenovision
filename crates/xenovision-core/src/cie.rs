@@ -228,13 +228,12 @@ mod tests {
 
     #[test]
     fn wide_curve_does_not_wash_out_to_white_or_wrong_hue() {
-        // Regression test: a S-cone-shaped curve (Govardovskii template,
-        // lambda_max=420, generated wide enough to span hundreds of
-        // samples) used to render magenta - the raw XYZ convolution here
-        // has no fixed luminance scale, so X and Z independently
-        // exceeded 1.0 while the old code clamped each sRGB channel to
-        // 0..1 *before* checking their relative sizes, which maxed out
-        // R and B together regardless of the curve's actual (blue-ish)
+        // A S-cone-shaped curve (Govardovskii template, lambda_max=420,
+        // generated wide enough to span hundreds of samples): the raw
+        // XYZ convolution here has no fixed luminance scale, so X and Z
+        // can independently exceed 1.0. Clamping each sRGB channel to
+        // 0..1 *before* checking their relative sizes would max out R
+        // and B together regardless of the curve's actual (blue-ish)
         // shape. A 420nm receptor should render blue-dominated, not
         // magenta (R and B both maxed, G near zero) or white (all maxed).
         let curve = SpectralCurve::new("S-cone-like", CurveType::Sensitivity).with_points(

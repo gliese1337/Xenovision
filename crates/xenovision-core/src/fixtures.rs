@@ -87,8 +87,8 @@ pub fn human() -> CurveSet {
     set.colorspace_curves = vec![s_cone, m_cone, l_cone];
 
     // Literature-standard red-green and blue-yellow contrasts (§2.3.1),
-    // replacing Phase 2's hardcoded candidate rows with real CurveSet
-    // data per §8.2's representability requirement.
+    // exercised through real CurveSet data per §8.2's representability
+    // requirement.
     set.opponent_contrasts = vec![
         OpponentContrast {
             name: "L - M (red-green)".to_string(),
@@ -358,8 +358,8 @@ pub fn goldfish() -> CurveSet {
 /// S/L receptors at 403/450/543nm. Unlike most birds (avian
 /// tetrachromats with a 4th UV and long-wave class), penguins have lost
 /// both the UV-sensitive and long-wavelength-sensitive classes - an
-/// actual evolutionary reduction, not a data gap, explaining why this
-/// is N=3 rather than pigeon's N=4.
+/// evolutionary reduction, not a data gap, explaining why this is N=3
+/// rather than pigeon's N=4.
 pub fn penguin() -> CurveSet {
     let mut set = CurveSet::new("Penguin (Spheniscus humboldti)");
     set.colorspace_curves = vec![
@@ -370,7 +370,7 @@ pub fn penguin() -> CurveSet {
     set.metadata.insert(
         "note".to_string(),
         "Penguins have lost the UV-sensitive and long-wavelength-sensitive cone classes most \
-         birds retain - an aquatic adaptation favoring blue-green \
+         birds retain - an evolutionary reduction (aquatic adaptation favoring blue-green \
          discrimination), not a data gap, which is why this is N=3 rather than a typical avian N=4."
             .to_string(),
     );
@@ -560,8 +560,8 @@ pub fn frog_photopic() -> CurveSet {
 /// works. This fixture models that directly: the entire receptor set
 /// lives in `isolated_curves`; the colorspace set is **empty** - the
 /// first fixture with zero colorspace receptors, exercising the N=0
-/// path through `Pipeline`/`derive_adaptation_matrix` for real (both
-/// handle it generically, same as the existing N=1 monochromat case -
+/// path through `Pipeline`/`derive_adaptation_matrix` (both handle it
+/// generically, same as the existing N=1 monochromat case -
 /// no species-specific code needed here either, consistent with §8.2).
 /// §10.1's activation display is what makes this fixture's data visible
 /// at all: `Pipeline::coordinates` always returns `luminance = 0.0`,
@@ -605,8 +605,8 @@ pub fn mantis_shrimp() -> CurveSet {
          the colorspace set is intentionally empty - no species in this app has more raw \
          photoreceptor diversity, and none has less opponent-process participation. Luminance \
          and chroma are always exactly 0 for this fixture by construction (nothing in the \
-         colorspace set to weight) - not a bug, the direct consequence of modeling the hypothesis \
-         that these channels aren't combined into a human-style opponent colorspace at all. The \
+         colorspace set to weight) - the direct consequence of modeling the hypothesis that \
+         these channels aren't combined into a human-style opponent colorspace at all. The \
          individual receptor activations (via Pipeline::colorspace_activations/isolated_activations, \
          §10.1) are this fixture's only meaningful output."
             .to_string(),

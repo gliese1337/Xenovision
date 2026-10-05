@@ -1,15 +1,18 @@
-//! Xenovision GUI: three panels (Workspace, Comparison, Stimulus Editor)
-//! sharing one `AppState`. The main OS window hosts any docked panels as
-//! tabs; each other panel floats in its own OS window or is hidden (see `dock`).
+//! Xenovision GUI: three panels (Workspace, Comparison, Stimulus Editor;
+//! design doc `docs/gui-design-doc.md` §2) sharing one `AppState`. The
+//! main OS window hosts any docked panels as tabs; each other panel
+//! floats in its own OS window or is hidden (see `dock`).
 
 // Release builds on Windows are GUI programs, so no console window opens
 // alongside the app. Debug builds keep the console for log output.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod batch_export;
 mod dock;
 mod gradient;
 mod multi_curve_editor;
 mod plot_axis;
 mod state;
+mod stimulus_picker;
 mod undo;
 mod window_comparison;
 mod window_stimulus_editor;
@@ -126,6 +129,19 @@ fn main() -> eframe::Result<()> {
         // ExitFailure) - vsync's swap-interval handling is a plausible
         // interaction point with GL surface recreation on resize under
         // software/virtualized rendering.
+        //
+        // Still unconfirmed and now reported again on the three-window
+        // build, with one "Connection reset by peer" per open viewport -
+        // this crash is NOT fixed yet. A tried follow-up,
+        // `hardware_acceleration: HardwareAcceleration::Off` (forcing
+        // software rendering so there's no GPU/Zink surface-renegotiation
+        // path to fail on resize), was reverted after this sandbox's own
+        // smoke test showed it causes a *different*, immediate crash here
+        // ("failed to find a matching configuration for creating glutin
+        // config") - worse than the original bug in a GL-impaired
+        // environment, so not safe to ship blind. This sandbox has no
+        // resizable display, so the actual resize crash itself still
+        // can't be reproduced or verified fixed from here.
         vsync: false,
         ..Default::default()
     };
@@ -258,8 +274,8 @@ mod layout_tests {
         }
     }
 
-    /// Lays out the Workspace at two window widths and checks the
-    /// left rail is present and the colorspace graph tracks the width.
+    /// Lays out the Workspace at two window widths and checks the left
+    /// rail is present and the colorspace graph tracks the width.
     #[test]
     fn workspace_left_rail_present_and_graph_tracks_window_width() {
         let mut app = App::default();

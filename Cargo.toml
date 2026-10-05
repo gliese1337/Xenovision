@@ -1,8 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "spikes/spike_a",
-    "spikes/spike_b",
     "crates/xenovision-core",
     "crates/xenovision-app",
 ]

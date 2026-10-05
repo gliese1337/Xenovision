@@ -1,10 +1,9 @@
 //! GeoTIFF sensor/instrument band-set presets (design doc §3.4.1 point
 //! 2's dropdown fallback for when a GeoTIFF carries no wavelength
-//! metadata - confirmed to be the default case, not an edge case, in
-//! `spikes/spike_b`). Stored the same way as the illuminant notch/
-//! narrow-band-source presets (`preset_store`'s pattern): a built-in
-//! pristine default list, user-editable on disk, with the same
-//! load/save/restore shape.
+//! metadata - the default case, not an edge case). Stored the same way
+//! as the illuminant notch/narrow-band-source presets (`preset_store`'s
+//! pattern): a built-in pristine default list, user-editable on disk,
+//! with the same load/save/restore shape.
 
 use serde::{Deserialize, Serialize};
 

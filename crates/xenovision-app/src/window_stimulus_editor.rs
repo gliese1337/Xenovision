@@ -28,6 +28,7 @@ use xenovision_core::{illumination, CurveType, QuantityKind, SpectralCurve};
 
 use crate::multi_curve_editor;
 use crate::state::{AppState, CurveId, StimulusEntry};
+use crate::stimulus_picker;
 
 const STEP_NM: f64 = 1.0;
 
@@ -47,6 +48,7 @@ pub enum CreationMode {
     Csv,
     DeriveReflectance,
     DeriveRadiance,
+    BulkDeriveReflectance,
     Notch,
 }
 
@@ -78,6 +80,11 @@ pub struct StimulusEditorState {
     pub sensor_presets: Vec<SensorBandPreset>,
     pub sensor_preset_picker: usize,
     pub manual_wavelengths: String,
+    /// Pixel stride for "Extract every pixel as curves" (1 = every
+    /// pixel) - a practical throttle on how many curves one bulk import
+    /// creates, not a hard cap (§4.2.6's addendum).
+    pub pixel_import_stride: usize,
+    pub pixel_import_status: String,
 
     // --- text/CSV import ---
     pub csv_name: String,
@@ -88,6 +95,10 @@ pub struct StimulusEditorState {
     pub derive_source: Option<CurveId>,
     pub derive_luminant: Option<CurveId>,
     pub derive_status: String,
+
+    // --- bulk derive reflectance ---
+    /// Which stimulus curves are checked in the bulk-convert checklist.
+    pub bulk_derive_selection: std::collections::HashSet<CurveId>,
 
     // --- custom notch -> absorption curve ---
     pub notch_presets: Vec<xenovision_core::blackbody::NamedNotch>,
@@ -124,6 +135,8 @@ impl Default for StimulusEditorState {
             sensor_presets: sensor_presets::load_sensor_presets(),
             sensor_preset_picker: 0,
             manual_wavelengths: String::new(),
+            pixel_import_stride: 1,
+            pixel_import_status: String::new(),
 
             csv_name: String::new(),
             csv_text: String::new(),
@@ -132,6 +145,8 @@ impl Default for StimulusEditorState {
             derive_source: None,
             derive_luminant: None,
             derive_status: String::new(),
+
+            bulk_derive_selection: std::collections::HashSet::new(),
 
             notch_presets: xenovision_core::blackbody::load_notch_presets(),
             notch: xenovision_core::blackbody::NamedNotch {
@@ -163,6 +178,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut AppState) {
             CreationMode::Csv => csv_import_panel(ui, app),
             CreationMode::DeriveReflectance => derive_panel(ui, app, true),
             CreationMode::DeriveRadiance => derive_panel(ui, app, false),
+            CreationMode::BulkDeriveReflectance => bulk_derive_reflectance_panel(ui, app),
             CreationMode::Notch => notch_panel(ui, app),
         });
     });
@@ -184,31 +200,55 @@ fn left_rail(ui: &mut egui::Ui, app: &mut AppState) {
     new_stimulus_menu(ui, app);
     ui.separator();
 
-    let order = app.stimulus_order.clone();
-    for id in order {
-        let Some(entry) = app.stimulus_curves.get(&id) else {
+    let tree = stimulus_picker::corpus_tree(app, &|_| true);
+    render_stimulus_tree(ui, app, &tree);
+}
+
+/// Walks a corpus tree rendering `stimulus_row` (select-for-editing +
+/// unload) at each leaf, nesting named corpora as `CollapsingHeader`s -
+/// the Stimulus Editor's own curve list isn't a multi-select checklist
+/// like the other three pickers, so it doesn't go through
+/// `stimulus_picker::render_corpus_checklist`.
+fn render_stimulus_tree(ui: &mut egui::Ui, app: &mut AppState, nodes: &[stimulus_picker::CorpusNode]) {
+    for node in nodes {
+        if !node.is_named_group {
+            stimulus_row(ui, app, node.curves[0].0);
             continue;
-        };
-        let label = format!(
-            "{} [{}]{}",
-            entry.curve.name,
-            quantity_label(&entry.curve.quantity),
-            if entry.dirty { " *" } else { "" }
-        );
-        ui.horizontal(|ui| {
-            if ui
-                .selectable_label(app.stimulus_editor.selected == Some(id), label)
-                .clicked()
-            {
-                app.stimulus_editor.selected = Some(id);
-                app.stimulus_editor.selected_point = None;
-                app.stimulus_editor.creation_mode = CreationMode::None;
+        }
+        let count = node.all_curves().len();
+        let plural = if count == 1 { "" } else { "s" };
+        ui.collapsing(format!("{} ({count} curve{plural})", node.name), |ui| {
+            for (id, _) in &node.curves {
+                stimulus_row(ui, app, *id);
             }
-            if ui.small_button("×").clicked() {
-                request_unload(app, id);
-            }
+            render_stimulus_tree(ui, app, &node.children);
         });
     }
+}
+
+fn stimulus_row(ui: &mut egui::Ui, app: &mut AppState, id: CurveId) {
+    let Some(entry) = app.stimulus_curves.get(&id) else {
+        return;
+    };
+    let label = format!(
+        "{} [{}]{}",
+        entry.curve.name,
+        quantity_label(&entry.curve.quantity),
+        if entry.dirty { " *" } else { "" }
+    );
+    ui.horizontal(|ui| {
+        if ui
+            .selectable_label(app.stimulus_editor.selected == Some(id), label)
+            .clicked()
+        {
+            app.stimulus_editor.selected = Some(id);
+            app.stimulus_editor.selected_point = None;
+            app.stimulus_editor.creation_mode = CreationMode::None;
+        }
+        if ui.small_button("×").clicked() {
+            request_unload(app, id);
+        }
+    });
 }
 
 /// Adds `curve` as a new library entry, selects it, and leaves creation
@@ -228,6 +268,29 @@ fn add_and_select(app: &mut AppState, curve: SpectralCurve) -> CurveId {
     app.stimulus_editor.selected_point = None;
     app.stimulus_editor.creation_mode = CreationMode::None;
     id
+}
+
+/// Adds many curves at once (a bulk import, §4.2.6's addendum) without
+/// reassigning selection/creation-mode on every single one the way
+/// `add_and_select` does - the caller decides what, if anything, should
+/// end up selected afterward.
+fn add_many(app: &mut AppState, curves: Vec<SpectralCurve>) {
+    if curves.is_empty() {
+        return;
+    }
+    let first_id = app.alloc_id_range(curves.len());
+    for (i, curve) in curves.into_iter().enumerate() {
+        let id = first_id + i as u64;
+        app.stimulus_order.push(id);
+        app.stimulus_curves.insert(
+            id,
+            StimulusEntry {
+                curve,
+                file_path: None,
+                dirty: true,
+            },
+        );
+    }
 }
 
 fn new_stimulus_menu(ui: &mut egui::Ui, app: &mut AppState) {
@@ -266,6 +329,13 @@ fn new_stimulus_menu(ui: &mut egui::Ui, app: &mut AppState) {
         if ui.button("Derive radiance from reflectance...").clicked() {
             app.stimulus_editor.creation_mode = CreationMode::DeriveRadiance;
             app.stimulus_editor.derive_source = None;
+            app.stimulus_editor.derive_luminant = app.comparison.reference_luminant;
+            app.stimulus_editor.derive_status.clear();
+            ui.close_menu();
+        }
+        if ui.button("Bulk-convert radiance to reflectance...").clicked() {
+            app.stimulus_editor.creation_mode = CreationMode::BulkDeriveReflectance;
+            app.stimulus_editor.bulk_derive_selection.clear();
             app.stimulus_editor.derive_luminant = app.comparison.reference_luminant;
             app.stimulus_editor.derive_status.clear();
             ui.close_menu();
@@ -452,6 +522,19 @@ fn editor_panel(ui: &mut egui::Ui, app: &mut AppState) {
         }
     });
 
+    ui.horizontal(|ui| {
+        ui.label("Corpus:");
+        let entry = app.stimulus_curves.get_mut(&id).unwrap();
+        if stimulus_picker::corpus_path_field(ui, &mut entry.curve.metadata) {
+            entry.dirty = true;
+        }
+    })
+    .response
+    .on_hover_text(
+        "A \"/\"-separated path grouping this curve into a corpus/sub-corpus for bulk \
+         selection elsewhere (e.g. \"forest.tif/Canopy\") - blank means ungrouped.",
+    );
+
     quantity_kind_editor(ui, app, id);
     reflectance_range_warning(ui, app, id);
 
@@ -580,9 +663,9 @@ fn quantity_kind_editor(ui: &mut egui::Ui, app: &mut AppState, id: CurveId) {
 /// normalized so every sample is between 0 and 1." This is a soft,
 /// non-blocking flag, not a clamp - a value measured or derived outside
 /// that range is unusual but not meaningless (e.g. a calibration
-/// artifact, or a genuinely retroreflective/fluorescent sample), and an
-/// earlier fix deliberately stopped the graph from clipping such values
-/// out of view, so this doesn't fight that by silently rewriting the data.
+/// artifact, or a retroreflective/fluorescent sample), so values outside
+/// [0, 1] stay visible on the graph and in the data rather than being
+/// clipped or silently rewritten.
 fn reflectance_range_warning(ui: &mut egui::Ui, app: &AppState, id: CurveId) {
     let Some(entry) = app.stimulus_curves.get(&id) else {
         return;
@@ -731,7 +814,7 @@ fn derive_panel(ui: &mut egui::Ui, app: &mut AppState, reflectance_direction: bo
 /// wavelength is under 50 (nothing in this app's actual nm range is
 /// ever that small), the whole file is assumed to be in micrometers and
 /// converted. Also drops USGS's "no data" sentinel values (magnitudes
-/// far outside anything a real measurement would produce).
+/// far outside anything an actual measurement would produce).
 fn parse_csv_points(text: &str) -> Vec<(f64, f64)> {
     let mut raw: Vec<(f64, f64)> = Vec::new();
     for line in text.lines() {
@@ -848,38 +931,31 @@ fn image_import_panel(ui: &mut egui::Ui, app: &mut AppState) {
 
     let state = &mut app.stimulus_editor;
 
-    if hyperspectral::GDAL_AVAILABLE {
-        ui.label("Load an ENVI (point at the .hdr) or GeoTIFF file:");
-        ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut state.image_path);
-            if ui.button("Load").clicked() {
-                match hyperspectral::load_envi_or_geotiff(&state.image_path) {
-                    Ok(cube) => {
-                        let has_wavelengths = cube.wavelengths_nm.is_some();
-                        state.image_status = format!(
-                            "Loaded {}x{} pixels, {} bands{}",
-                            cube.samples,
-                            cube.lines,
-                            cube.bands,
-                            if has_wavelengths {
-                                " (wavelength metadata found)"
-                            } else {
-                                " (no wavelength metadata - assign one below before extracting)"
-                            }
-                        );
-                        state.cube = Some(cube);
-                        reset_after_new_cube(state);
-                    }
-                    Err(e) => state.image_status = format!("Load failed: {e}"),
+    ui.label("Load an ENVI (point at the .hdr) or GeoTIFF file:");
+    ui.horizontal(|ui| {
+        ui.text_edit_singleline(&mut state.image_path);
+        if ui.button("Load").clicked() {
+            match hyperspectral::load_envi_or_geotiff(&state.image_path) {
+                Ok(cube) => {
+                    let has_wavelengths = cube.wavelengths_nm.is_some();
+                    state.image_status = format!(
+                        "Loaded {}x{} pixels, {} bands{}",
+                        cube.samples,
+                        cube.lines,
+                        cube.bands,
+                        if has_wavelengths {
+                            " (wavelength metadata found)"
+                        } else {
+                            " (no wavelength metadata - assign one below before extracting)"
+                        }
+                    );
+                    state.cube = Some(cube);
+                    reset_after_new_cube(state);
                 }
+                Err(e) => state.image_status = format!("Load failed: {e}"),
             }
-        });
-    } else {
-        ui.label(
-            "ENVI and GeoTIFF import isn't included in this build (it needs the GDAL \
-             library). MATLAB .mat files below, and Import from text/CSV, still work.",
-        );
-    }
+        }
+    });
 
     ui.separator();
     ui.label("Or load a MATLAB .mat hypercube:");
@@ -1207,7 +1283,7 @@ fn image_import_panel(ui: &mut egui::Ui, app: &mut AppState) {
         let as_illumination = state.as_illumination;
         match hyperspectral::extracted_curve(cube, &region, &region_label, as_illumination) {
             Some(curve) => {
-                app.stimulus_editor.image_status =
+                state.image_status =
                     format!("Extracted \"{}\" into the stimulus library", curve.name);
                 add_and_select(app, curve);
                 // Extraction can continue from the same loaded image, so
@@ -1219,5 +1295,229 @@ fn image_import_panel(ui: &mut egui::Ui, app: &mut AppState) {
                 app.stimulus_editor.image_status = "Extraction failed - empty region".to_string()
             }
         }
+    }
+
+    bulk_pixel_import_section(ui, app);
+}
+
+/// The "extract every pixel as curves" control (§4.2.6's addendum),
+/// factored into its own re-borrow of `app.stimulus_editor`/its cube so
+/// it doesn't extend the outer `image_import_panel`'s own `state`/`cube`
+/// borrows across the `add_many(app, ...)` call this needs at the end.
+fn bulk_pixel_import_section(ui: &mut egui::Ui, app: &mut AppState) {
+    ui.separator();
+    ui.label(
+        "Bulk natural-scene corpus import (§4.2.6): one radiance curve per pixel, tagged \
+         so the opponent-contrast \"Custom corpus\" picker can select the whole batch at once.",
+    );
+    ui.horizontal(|ui| {
+        ui.label("Keep every Nth pixel:");
+        ui.add(
+            egui::DragValue::new(&mut app.stimulus_editor.pixel_import_stride)
+                .range(1..=1_000_000)
+                .speed(1),
+        );
+    });
+    if !app.stimulus_editor.pixel_import_status.is_empty() {
+        ui.label(app.stimulus_editor.pixel_import_status.clone());
+    }
+    let stride = app.stimulus_editor.pixel_import_stride.max(1);
+    let region = app.stimulus_editor.region.clone();
+    let Some(cube) = app.stimulus_editor.cube.as_ref() else {
+        return;
+    };
+    let has_wavelengths = cube.wavelengths_nm.is_some();
+    let estimated_curves = estimate_region_pixel_count(cube, region.as_ref()).div_ceil(stride);
+    ui.label(format!("~{estimated_curves} curve(s) will be created."));
+    const WARN_THRESHOLD: usize = 5000;
+    if estimated_curves > WARN_THRESHOLD {
+        ui.colored_label(
+            egui::Color32::from_rgb(220, 180, 40),
+            format!(
+                "⚠ That's a lot of curves ({estimated_curves}) - consider a larger stride. \
+                 Not blocked, just slow and memory-heavy."
+            ),
+        );
+    }
+    if !has_wavelengths {
+        ui.label("Assign a wavelength axis above before extracting.");
+    }
+    let clicked = ui
+        .add_enabled(
+            has_wavelengths,
+            egui::Button::new("Extract every pixel as curves"),
+        )
+        .clicked();
+    if !clicked {
+        return;
+    }
+
+    let region_label = match &region {
+        Some(Region::Rectangle { x0, y0, x1, y1 }) => {
+            format!("rect ({x0:.0},{y0:.0})-({x1:.0},{y1:.0})")
+        }
+        Some(Region::Polygon(points)) => format!("polygon ({} vertices)", points.len()),
+        None => "whole image".to_string(),
+    };
+    let (curves, batch_label) = {
+        let cube = app.stimulus_editor.cube.as_ref().unwrap();
+        // "/" nests these under a corpus named for the source image, with
+        // the region as a sub-corpus (stimulus_picker's hierarchy, §4.2.6).
+        let batch_label = format!("{}/{region_label}", cube.source_label);
+        let spectra = hyperspectral::extract_region_pixel_spectra(cube, region.as_ref(), stride);
+        let curves: Vec<SpectralCurve> = spectra
+            .iter()
+            .filter_map(|(line, sample, spectrum)| {
+                hyperspectral::pixel_curve(cube, *line, *sample, spectrum, &batch_label)
+            })
+            .collect();
+        (curves, batch_label)
+    };
+    let count = curves.len();
+    add_many(app, curves);
+    app.stimulus_editor.pixel_import_status =
+        format!("Imported {count} pixel curve(s) into batch \"{batch_label}\"");
+}
+
+/// Cheap, approximate pixel count for the live "~N curves" estimate
+/// above - exact for `None` (whole image) and a `Rectangle`; a bounding-
+/// box upper bound for a `Polygon` (an exact point-in-polygon scan is
+/// the extraction's own job, not something to redo every frame just to
+/// label a button).
+fn estimate_region_pixel_count(cube: &HyperspectralCube, region: Option<&Region>) -> usize {
+    let (w, h) = match region {
+        None => (cube.samples as f64, cube.lines as f64),
+        Some(Region::Rectangle { x0, y0, x1, y1 }) => ((x1 - x0).abs(), (y1 - y0).abs()),
+        Some(Region::Polygon(points)) => {
+            let (mut xmin, mut ymin, mut xmax, mut ymax) =
+                (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+            for &(x, y) in points {
+                xmin = xmin.min(x);
+                ymin = ymin.min(y);
+                xmax = xmax.max(x);
+                ymax = ymax.max(y);
+            }
+            if points.is_empty() {
+                (0.0, 0.0)
+            } else {
+                (xmax - xmin, ymax - ymin)
+            }
+        }
+    };
+    (w.max(0.0) * h.max(0.0)).round() as usize
+}
+
+/// Bulk radiance → reflectance panel (§4.2.6's addendum): the same
+/// physical operation as `derive_panel(..., true)`, applied to many
+/// selected curves against one shared luminant instead of one at a time.
+fn bulk_derive_reflectance_panel(ui: &mut egui::Ui, app: &mut AppState) {
+    ui.heading("Bulk-convert radiance to reflectance");
+    ui.label(
+        "Select Radiance-tagged curves (e.g. a batch imported from an image's pixels) and a \
+         shared luminant they were measured under; each gets its own new Reflectance curve, \
+         added alongside the original.",
+    );
+    if ui.button("Done").clicked() {
+        app.stimulus_editor.creation_mode = CreationMode::None;
+    }
+    ui.separator();
+
+    ui.label("Luminant it was measured under:");
+    let mut illum = app.stimulus_editor.derive_luminant;
+    egui::ComboBox::from_id_salt("bulk_derive_luminant")
+        .selected_text(
+            illum
+                .and_then(|id| app.luminants.get(&id))
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "(choose one)".to_string()),
+        )
+        .show_ui(ui, |ui| {
+            for &id in &app.luminant_order {
+                if let Some(curve) = app.luminants.get(&id) {
+                    if ui
+                        .selectable_label(illum == Some(id), &curve.name)
+                        .clicked()
+                    {
+                        illum = Some(id);
+                    }
+                }
+            }
+        });
+    app.stimulus_editor.derive_luminant = illum;
+
+    ui.separator();
+    ui.label("Curves to convert:");
+    let is_radiance = |c: &SpectralCurve| matches!(c.quantity, QuantityKind::Radiance { .. });
+    let tree = stimulus_picker::corpus_tree(app, &is_radiance);
+    let selection = app.stimulus_editor.bulk_derive_selection.clone();
+    let is_included = |id: CurveId| selection.contains(&id);
+    let mut toggled: Vec<(CurveId, bool)> = Vec::new();
+    let mut on_toggle = |ids: &[CurveId], included: bool| {
+        toggled.extend(ids.iter().map(|&id| (id, included)));
+    };
+    stimulus_picker::render_corpus_checklist(ui, &tree, &is_included, &mut on_toggle);
+    for (id, included) in toggled {
+        toggle_bulk_derive_selection(app, id, included);
+    }
+
+    let selected_count = app.stimulus_editor.bulk_derive_selection.len();
+    let can_convert = selected_count > 0 && illum.is_some();
+    if ui
+        .add_enabled(
+            can_convert,
+            egui::Button::new(format!("Convert {selected_count} curve(s)")),
+        )
+        .clicked()
+    {
+        let Some(iid) = illum else { return };
+        let Some(illum_curve) = app.luminants.get(&iid).cloned() else {
+            return;
+        };
+        let selected: Vec<CurveId> = app.stimulus_editor.bulk_derive_selection.iter().copied().collect();
+        let mut converted = Vec::new();
+        let mut skipped = 0;
+        for id in selected {
+            let Some(entry) = app.stimulus_curves.get(&id) else {
+                continue;
+            };
+            let source_batch = entry.curve.metadata.get("batch").cloned();
+            match illumination::derive_reflectance(&entry.curve, &illum_curve, STEP_NM) {
+                Ok(mut curve) => {
+                    if let Some(batch) = source_batch {
+                        // "/" nests the converted curve as a sub-corpus of
+                        // its source batch (stimulus_picker's hierarchy).
+                        curve
+                            .metadata
+                            .insert("batch".to_string(), format!("{batch}/reflectance"));
+                    }
+                    converted.push(curve);
+                }
+                Err(_) => skipped += 1,
+            }
+        }
+        let converted_count = converted.len();
+        add_many(app, converted);
+        app.stimulus_editor.derive_status = if skipped > 0 {
+            format!(
+                "Converted {converted_count} of {} curves; {skipped} skipped - unit mismatch",
+                converted_count + skipped
+            )
+        } else {
+            format!("Converted {converted_count} curve(s)")
+        };
+    }
+    if !app.stimulus_editor.derive_status.is_empty() {
+        ui.colored_label(
+            egui::Color32::from_rgb(90, 160, 90),
+            &app.stimulus_editor.derive_status,
+        );
+    }
+}
+
+fn toggle_bulk_derive_selection(app: &mut AppState, id: CurveId, included: bool) {
+    if included {
+        app.stimulus_editor.bulk_derive_selection.insert(id);
+    } else {
+        app.stimulus_editor.bulk_derive_selection.remove(&id);
     }
 }

@@ -1,8 +1,26 @@
-//! Shared application state for the three-window redesign:
-//! one `AppState`, read and written by all three windows
-//! (`window_workspace`, `window_comparison`, `window_stimulus_editor`),
-//! with no per-window copy of curve data.
-
+//! Shared application state for the three-window redesign
+//! (`docs/gui-design-doc.md` §4): one `AppState`, read and written by
+//! all three windows (`window_workspace`, `window_comparison`,
+//! `window_stimulus_editor`), with no per-window copy of curve data.
+//!
+//! Deviations from §4's Rust sketches, pragmatic rather than exact:
+//! - `Curve` is just `xenovision_core::SpectralCurve` directly (it
+//!   already has every field §4.2's `Curve` sketch wants - name, points,
+//!   curve_type, quantity, omega, eta, luminance_weight, metadata) -
+//!   no separate wrapper type.
+//! - `CurveSetId`/`CurveId` are plain incrementing `u64`s from one
+//!   shared counter (`AppState::alloc_id`), not a `slotmap` - ids are
+//!   never reused, so this behaves identically for stability purposes.
+//! - Undo (§4.3) is implemented as whole-`CurveSet`-shaped snapshots
+//!   (`EditableSnapshot`) via `undo::UndoManager`, generalized from this
+//!   app's existing, already-tested gesture-detecting snapshot manager,
+//!   rather than a hand-rolled `EditAction` command log - the design doc
+//!   explicitly allows either, and reusing proven logic is lower-risk.
+//! - `comparison`/`stimulus_editor` are always-present structs plus a
+//!   `show_*` visibility bool, rather than `Option<...>` - behaviorally
+//!   identical ("state persists while hidden") with less null-handling.
+//! - `DistanceMetric` is reused directly from `xenovision_core::comparison`
+//!   rather than redefined.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -24,7 +42,7 @@ pub type CurveSetId = u64;
 pub type CurveId = u64;
 
 /// Which of a `CurveSet`'s two curve lists the Workspace window's left
-/// rail / graph is currently showing.
+/// rail / graph is currently showing (design doc §2.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CurveListTab {
     #[default]
@@ -32,8 +50,8 @@ pub enum CurveListTab {
     Isolated,
 }
 
-/// Everything the per-tab undo/redo stack needs to restore - every
-/// field a Workspace editing surface can touch, *except* `dirty`/
+/// Everything the per-tab undo/redo stack (§4.3/§1.7) needs to restore -
+/// every field a Workspace editing surface can touch, *except* `dirty`/
 /// `revision`/`file_path`, which are bookkeeping, not user-visible data.
 #[derive(Clone, PartialEq)]
 pub struct EditableSnapshot {
@@ -43,8 +61,8 @@ pub struct EditableSnapshot {
     pub metadata: BTreeMap<String, String>,
 }
 
-/// App-level Curve Set like `xenovision_core::CurveSet`, but curves
-/// are referenced by stable `CurveId` rather than held inline,
+/// App-level Curve Set (design doc §4.2): like `xenovision_core::CurveSet`,
+/// but curves are referenced by stable `CurveId` rather than held inline,
 /// so a tab/selection/Comparison-window reference survives an edit
 /// elsewhere in the set.
 pub struct AppCurveSet {
@@ -59,7 +77,7 @@ pub struct AppCurveSet {
     pub dirty: bool,
     /// Bumped on every edit affecting the receptor curves, opponent
     /// contrasts, or luminance weights - `TransformCache`'s invalidation
-    /// key.
+    /// key (§4.6).
     pub revision: u64,
 }
 
@@ -168,7 +186,49 @@ fn from_core(core: CoreCurveSet, id: CurveSetId, next_id: &mut u64) -> AppCurveS
     }
 }
 
-/// Per-tab UI state selection, undo/redo, and
+/// Which "natural scene" ensemble (§4.2.6) the opponent-contrast
+/// auto-generate control uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NaturalSceneMode {
+    #[default]
+    Parametric,
+    Corpus,
+}
+
+/// Transient (not persisted - like Comparison's `reference_luminant`)
+/// per-tab state for the opponent-contrast "auto-generate from natural-
+/// scene statistics" control (§4.2.6).
+pub struct NaturalSceneUiState {
+    pub mode: NaturalSceneMode,
+    pub illuminant: Option<CurveId>,
+    /// Parametric mode's smoothness-kernel correlation length (nm) - a
+    /// tunable approximation, not a measured literature constant.
+    pub correlation_length_nm: f64,
+    /// Corpus mode's selection: presence in the map means selected,
+    /// defaulting to weight 1.0 (see `stimulus_picker`'s corpus tree for
+    /// how whole corpora/sub-corpora get selected at once).
+    pub corpus_weights: HashMap<CurveId, f64>,
+    /// Scratch value for the "apply this weight to every selected
+    /// curve" control, kept here (not a per-frame local) so it doesn't
+    /// reset to its default every frame.
+    pub corpus_shared_weight: f64,
+    pub status: String,
+}
+
+impl Default for NaturalSceneUiState {
+    fn default() -> Self {
+        NaturalSceneUiState {
+            mode: NaturalSceneMode::default(),
+            illuminant: None,
+            correlation_length_nm: 50.0,
+            corpus_weights: HashMap::new(),
+            corpus_shared_weight: 1.0,
+            status: String::new(),
+        }
+    }
+}
+
+/// Per-tab UI state (design doc §4.3): selection, undo/redo, and
 /// transient editing-surface scratch buffers.
 pub struct TabUiState {
     pub selected_curve: Option<CurveId>,
@@ -184,6 +244,7 @@ pub struct TabUiState {
     pub save_path_buf: String,
     pub csv_path_buf: String,
     pub status: String,
+    pub natural_scene: NaturalSceneUiState,
 }
 
 impl Default for TabUiState {
@@ -202,11 +263,12 @@ impl Default for TabUiState {
             save_path_buf: "visual_system.json".to_string(),
             csv_path_buf: "curve.csv".to_string(),
             status: String::new(),
+            natural_scene: NaturalSceneUiState::default(),
         }
     }
 }
 
-/// Workspace window state
+/// Workspace window state (design doc §4.3).
 pub struct WorkspaceState {
     pub open_tabs: Vec<CurveSetId>,
     pub active_tab: usize,
@@ -229,11 +291,11 @@ pub struct StimulusEntry {
     pub dirty: bool,
 }
 
-/// Comparison window state. Coordinate tables and difference matrices
-/// are deliberately *not* stored here - they're recomputed each frame
-/// (via `TransformCache`) from the fields below, so there's no
-/// derived-data copy that could drift from the underlying curves after
-/// a Workspace edit.
+/// Comparison window state (design doc §4.4). Coordinate tables and
+/// difference matrices are deliberately *not* stored here - they're
+/// recomputed each frame (via `TransformCache`) from the fields below,
+/// so there's no derived-data copy that could drift from the underlying
+/// curves after a Workspace edit.
 pub struct ComparisonState {
     /// Ids into `AppState::stimulus_curves` currently included in this
     /// comparison run - a subset of the shared library, not a copy of
@@ -256,12 +318,38 @@ pub struct ComparisonState {
     /// the selected luminant, and the exponent weight to apply it with.
     pub absorption_to_apply: Option<CurveId>,
     pub absorption_weight: f64,
+    /// Batch export (large-group-to-CSV) scratch state.
+    pub export: BatchExportState,
 }
 
-/// Cross-window-shared cache: keyed by (species set, reference luminant),
-/// invalidated when the set's `revision` no longer matches what the cached
-/// `Pipeline` was built from. `Pipeline` isn't `Clone`, so cache hits
-/// share one `Rc` rather than re-deriving the adaptation matrix.
+/// Transient scratch state for exporting the coordinate table (and,
+/// optionally, each stimulus's distance to one reference stimulus)
+/// over every currently-`selected_stimuli` to a CSV file - the "large
+/// group" counterpart to the live, interactive tables above, which
+/// don't scale to thousands of rows in an egui table.
+pub struct BatchExportState {
+    pub path_buf: String,
+    pub include_distance_to_reference: bool,
+    pub reference_stimulus: Option<CurveId>,
+    pub status: String,
+}
+
+impl Default for BatchExportState {
+    fn default() -> Self {
+        BatchExportState {
+            path_buf: "comparison.csv".to_string(),
+            include_distance_to_reference: false,
+            reference_stimulus: None,
+            status: String::new(),
+        }
+    }
+}
+
+/// Cross-window-shared cache (design doc §4.6): keyed by (species set,
+/// reference luminant), invalidated when the set's `revision` no
+/// longer matches what the cached `Pipeline` was built from. `Pipeline`
+/// isn't `Clone`, so cache hits share one `Rc` rather than re-deriving
+/// the adaptation matrix.
 #[derive(Default)]
 pub struct TransformCache {
     cache: HashMap<(CurveSetId, CurveId), (Rc<Pipeline>, u64)>,
@@ -362,10 +450,10 @@ impl AppState {
 
         let mut luminants = HashMap::new();
         let mut luminant_order = Vec::new();
-        // A real default, not a "placeholder" - a perfectly flat
-        // spectrum is a legitimate reference environment in its own
-        // right (no wavelength-dependent bias at all), not just a
-        // stand-in for a better luminant someone hasn't picked yet.
+        // Not a "placeholder" - a perfectly flat spectrum is a
+        // legitimate reference environment in its own right (no
+        // wavelength-dependent bias at all), not just a stand-in for a
+        // better luminant someone hasn't picked yet.
         let uniform_id = next_id;
         next_id += 1;
         luminants.insert(
@@ -432,6 +520,7 @@ impl AppState {
                 luminant_target_power: 1.0,
                 absorption_to_apply: None,
                 absorption_weight: 1.0,
+                export: BatchExportState::default(),
             },
             stimulus_curves,
             stimulus_order,

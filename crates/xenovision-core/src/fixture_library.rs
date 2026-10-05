@@ -123,9 +123,9 @@ pub fn restore_builtin_defaults() -> Vec<CurveSet> {
 mod tests {
     use super::*;
 
-    /// Each test gets its own scratch directory (not the real, shared
+    /// Each test gets its own scratch directory (not the shared
     /// `data_dir()`) so bootstrap-on-empty behavior can be tested
-    /// without racing other tests or a real user's actual library.
+    /// without racing other tests or an actual user's library.
     fn scratch_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "xenovision-fixture-library-test-{label}-{}-{}",

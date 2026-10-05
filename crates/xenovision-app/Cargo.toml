@@ -17,9 +17,4 @@ eframe = { version = "0.29", default-features = false, features = [
     "x11",
 ] }
 egui = "0.29"
-xenovision-core = { path = "../xenovision-core", default-features = false }
-
-[features]
-# Passes through to xenovision-core: ENVI/GeoTIFF import via native GDAL.
-default = ["gdal"]
-gdal = ["xenovision-core/gdal"]
+xenovision-core = { path = "../xenovision-core" }

@@ -1,5 +1,10 @@
 # Xenovision User Guide
 
+A reference to every window, menu, and gesture in the current (three-window)
+build. See `docs/design-doc.md` and `docs/gui-design-doc.md` if you want the
+modeling math or the UI architecture behind what's described here - this
+document is purely "how do I use it."
+
 ## Overview
 
 Xenovision models and compares how different species perceive color. You
@@ -19,11 +24,11 @@ in its own separate window (see [Arranging windows](#arranging-windows)):
   off coordinates, distances, and cross-species summaries. Opens on demand.
 - **Stimulus Editor** - create and edit the stimulus curves (reflectance or
   radiance) that Comparison evaluates - by hand, derived from another curve,
-  or imported from a multispectral image or a text/CSV file. Opens on demand.
+  or imported from an image or a text/CSV file. Opens on demand.
 
 All three read and write the same underlying data. Edit a curve in Workspace
 and an open Comparison window updates on its next repaint - there's no
-separate "sync" step.
+separate "sync" step anywhere in the app.
 
 ## Core concepts
 

@@ -11,8 +11,10 @@ use xenovision_core::comparison::{self, DistanceMetric, SpeciesDeltaSColumn};
 use xenovision_core::pipeline::Coordinates;
 use xenovision_core::{illumination, CurveType, QuantityKind, SpectralCurve};
 
+use crate::batch_export;
 use crate::multi_curve_editor;
 use crate::state::{AppState, CurveId, CurveSetId};
+use crate::stimulus_picker;
 
 const STEP_NM: f64 = 1.0;
 
@@ -27,6 +29,8 @@ pub fn ui(ui: &mut egui::Ui, app: &mut AppState) {
         .show(ui, |ui| {
             top_bar(ui, app);
             luminant_editor(ui, app);
+            ui.separator();
+            batch_export::export_panel(ui, app);
             ui.separator();
 
             ui.columns(3, |columns| {
@@ -336,23 +340,28 @@ fn left_column(ui: &mut egui::Ui, app: &mut AppState) {
         ui.label("No stimulus curves yet - create one in the Stimulus Editor window.");
         return;
     }
-    for &id in &app.stimulus_order {
-        let Some(entry) = app.stimulus_curves.get(&id) else {
-            continue;
-        };
-        // Absorption curves modify luminants; they aren't stimuli.
-        if entry.curve.quantity == QuantityKind::Absorption {
-            continue;
+    // Absorption curves modify luminants; they aren't stimuli.
+    let not_absorption = |c: &SpectralCurve| c.quantity != QuantityKind::Absorption;
+    let tree = stimulus_picker::corpus_tree(app, &not_absorption);
+    let selected = app.comparison.selected_stimuli.clone();
+    let is_included = |id: CurveId| selected.contains(&id);
+    let mut toggled: Vec<(CurveId, bool)> = Vec::new();
+    let mut on_toggle = |ids: &[CurveId], included: bool| {
+        toggled.extend(ids.iter().map(|&id| (id, included)));
+    };
+    stimulus_picker::render_corpus_checklist(ui, &tree, &is_included, &mut on_toggle);
+    for (id, included) in toggled {
+        toggle_stimulus(app, id, included);
+    }
+}
+
+fn toggle_stimulus(app: &mut AppState, id: CurveId, included: bool) {
+    if included {
+        if !app.comparison.selected_stimuli.contains(&id) {
+            app.comparison.selected_stimuli.push(id);
         }
-        let name = entry.curve.name.clone();
-        let mut included = app.comparison.selected_stimuli.contains(&id);
-        if ui.checkbox(&mut included, &name).changed() {
-            if included {
-                app.comparison.selected_stimuli.push(id);
-            } else {
-                app.comparison.selected_stimuli.retain(|&i| i != id);
-            }
-        }
+    } else {
+        app.comparison.selected_stimuli.retain(|&i| i != id);
     }
 }
 

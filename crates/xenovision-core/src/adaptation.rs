@@ -1,18 +1,18 @@
-//! Chromatic adaptation matrix derivation (design doc §2.2.3). This is the
-//! real-codebase port of Spike A (`spikes/spike_a`), operating on actual
-//! `SpectralCurve` data instead of Gaussian stand-ins, and incorporating
-//! Spike A's key finding: a *fixed* regularization strength produces
-//! degenerate (off-diagonal-dominated) matrices for highly-correlated
-//! receptors. Here the regularization strength is searched per Curve Set
-//! instead of hardcoded.
+//! Chromatic adaptation matrix derivation (design doc §2.2.3), operating
+//! on actual `SpectralCurve` data. A *fixed* regularization strength
+//! produces degenerate (off-diagonal-dominated) matrices for highly-
+//! correlated receptors, so the regularization strength is searched per
+//! Curve Set instead of hardcoded.
 
 use crate::curve::SpectralCurve;
 use crate::linalg::{dot, Mat};
 
 /// Samples `curves` onto a common grid (the union of their domains, at
-/// `step_nm` spacing), treating each curve as zero outside its own domain
-/// - consistent with how `pipeline::integrate_product` treats curves.
-fn sample_curves_on_common_grid(curves: &[SpectralCurve], step_nm: f64) -> Vec<Vec<f64>> {
+/// `step_nm` spacing), treating each curve as zero outside its own domain,
+/// consistent with how `pipeline::integrate_product` treats curves.
+/// `pub(crate)` so `natural_opponent`'s parametric model can reuse it
+/// rather than duplicating grid-sampling logic.
+pub(crate) fn sample_curves_on_common_grid(curves: &[SpectralCurve], step_nm: f64) -> Vec<Vec<f64>> {
     let (lo, hi) = curves
         .iter()
         .filter_map(|c| c.domain())
@@ -243,8 +243,8 @@ pub struct AdaptationResult {
     pub lambda_used: f64,
     /// Whether `matrix` came out diagonal-dominant (every off-diagonal
     /// entry smaller in magnitude than the diagonal's 1.0) - the
-    /// structural property Spike A found necessary to avoid degenerate
-    /// channels. `false` means no `lambda` in the search range achieved
+    /// structural property necessary to avoid degenerate channels.
+    /// `false` means no `lambda` in the search range achieved
     /// it; `matrix` is still the best (smallest max-off-diagonal) found,
     /// but callers may want to warn the user (e.g. near-duplicate
     /// receptor curves can make this unreachable).
@@ -254,10 +254,9 @@ pub struct AdaptationResult {
 /// Derives the adaptation ("sharpening") matrix for a set of receptor
 /// curves by minimizing pairwise spectral overlap between the
 /// transformed basis (§2.2.3), searching for the smallest regularization
-/// strength that yields a diagonal-dominant result (Spike A's finding:
-/// a fixed strength either under-regularizes into degenerate matrices for
-/// highly-correlated receptors, or over-regularizes for well-separated
-/// ones).
+/// strength that yields a diagonal-dominant result: a fixed strength
+/// either under-regularizes into degenerate matrices for highly-
+/// correlated receptors, or over-regularizes for well-separated ones.
 pub fn derive_adaptation_matrix(curves: &[SpectralCurve], step_nm: f64) -> AdaptationResult {
     let n = curves.len();
 
@@ -351,9 +350,9 @@ mod tests {
             "max off-diag = {}",
             max_abs_offdiag(&result.matrix)
         );
-        // Mirrors Spike A's finding: the two closely-spaced receptors
-        // (M, L) need a non-trivial cross-term; the well-separated one
-        // (S) stays close to independent.
+        // The two closely-spaced receptors (M, L) need a non-trivial
+        // cross-term; the well-separated one (S) stays close to
+        // independent.
         assert!(
             result.matrix.get(0, 1).abs() < 0.3,
             "S-M cross-term too large"
@@ -369,10 +368,10 @@ mod tests {
         let curves = vec![cone_curve("S-cone", 432.0), cone_curve("L/M-cone", 555.0)];
         let result = derive_adaptation_matrix(&curves, 1.0);
         assert!(result.diagonal_dominant);
-        // Govardovskii curves have longer tails than Spike A's idealized
+        // Govardovskii curves have longer tails than idealized
         // Gaussians, so even "well separated" receptors leave some
         // residual overlap - still comfortably diagonal-dominant, just
-        // not negligible the way Spike A's Gaussian stand-ins were.
+        // not negligible.
         assert!(max_abs_offdiag(&result.matrix) < 0.25);
     }
 
@@ -384,9 +383,10 @@ mod tests {
         assert!(result.diagonal_dominant);
     }
 
-    /// A large custom system (N=24) - this used to take the GPU path,
-    /// whose single dispatch exceeded wgpu's 65535-workgroup limit at
-    /// this size and panicked. Fast enough to run by default now.
+    /// A large custom system (N=24), well past where the §7.2 soft cap
+    /// starts warning - fast enough via the CPU exact-gradient method
+    /// (see `gpu.rs`'s doc comment for the now-unused GPU path's own
+    /// per-dispatch size limit) to run by default rather than `#[ignore]`.
     #[test]
     fn large_n_system_derives_a_valid_matrix() {
         let n = 24;
@@ -429,7 +429,12 @@ mod tests {
     }
 
     /// Not run by default (`cargo test -- --ignored --nocapture` to
-    /// reproduce)
+    /// reproduce) - measured runtimes informing §7.2's soft-cap warning
+    /// threshold, against this implementation's actual lambda-schedule-
+    /// searching optimizer. Receptors evenly spaced across a 300nm
+    /// range (reasonably realistic, well-separated - the worst case of
+    /// closely-spaced/highly-correlated receptors needing several
+    /// lambda attempts instead of one would be slower still):
     ///
     /// | N  | measured   |
     /// |----|------------|

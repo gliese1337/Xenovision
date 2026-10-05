@@ -3,9 +3,6 @@
 #
 #   scripts/package.sh              package for this OS (Linux or macOS)
 #   scripts/package.sh --windows    cross-build the Windows package (from Linux)
-#   scripts/package.sh --with-gdal  include ENVI/GeoTIFF import (links GDAL;
-#                                   the package then needs GDAL installed or
-#                                   bundled on the target machine)
 #
 # Output goes to dist/. Needs: cargo, pandoc, wkhtmltopdf. --windows also
 # needs the x86_64-pc-windows-gnu Rust target and mingw-w64; macOS needs
@@ -16,12 +13,10 @@ cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
 WINDOWS=0
-FEATURES=(--no-default-features)
 for arg in "$@"; do
   case "$arg" in
     --windows) WINDOWS=1 ;;
-    --with-gdal) FEATURES=() ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -34,7 +29,6 @@ need pandoc "e.g. apt install pandoc / brew install pandoc"
 need wkhtmltopdf "e.g. apt install wkhtmltopdf / brew install --cask wkhtmltopdf"
 
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/xenovision-app/Cargo.toml | head -1)
-GDAL_TAG=$([ ${#FEATURES[@]} -eq 0 ] && echo "-gdal" || echo "")
 DIST="$ROOT/dist"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -57,8 +51,8 @@ if [ "$WINDOWS" -eq 1 ]; then
   rustup target list --installed 2>/dev/null | grep -qx "$TARGET" \
     || { echo "missing Rust target: rustup target add $TARGET" >&2; exit 1; }
   echo "==> Building for Windows ($TARGET)"
-  cargo build --release -p xenovision-app ${FEATURES[@]+"${FEATURES[@]}"} --target "$TARGET"
-  NAME="xenovision-$VERSION-windows-x86_64$GDAL_TAG"
+  cargo build --release -p xenovision-app --target "$TARGET"
+  NAME="xenovision-$VERSION-windows-x86_64"
   mkdir -p "$WORK/$NAME"
   cp "target/$TARGET/release/xenovision-app.exe" "$WORK/$NAME/Xenovision.exe"
   x86_64-w64-mingw32-strip "$WORK/$NAME/Xenovision.exe"
@@ -69,12 +63,12 @@ if [ "$WINDOWS" -eq 1 ]; then
 fi
 
 echo "==> Building for $(uname -s)"
-cargo build --release -p xenovision-app ${FEATURES[@]+"${FEATURES[@]}"}
+cargo build --release -p xenovision-app
 BIN="target/release/xenovision-app"
 
 case "$(uname -s)" in
   Linux)
-    NAME="xenovision-$VERSION-linux-$(uname -m)$GDAL_TAG"
+    NAME="xenovision-$VERSION-linux-$(uname -m)"
     mkdir -p "$WORK/$NAME"
     cp "$BIN" "$WORK/$NAME/xenovision"
     strip "$WORK/$NAME/xenovision"
@@ -84,7 +78,7 @@ case "$(uname -s)" in
     ;;
   Darwin)
     need hdiutil "built into macOS"
-    NAME="xenovision-$VERSION-macos-$(uname -m)$GDAL_TAG"
+    NAME="xenovision-$VERSION-macos-$(uname -m)"
     APP="$WORK/$NAME/Xenovision.app"
     mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
     cp "$BIN" "$APP/Contents/MacOS/Xenovision"

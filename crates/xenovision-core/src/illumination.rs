@@ -364,7 +364,7 @@ mod tests {
         );
     }
 
-    /// End-to-end exercise of Phase 5's actual exit criteria, not just
+    /// End-to-end exercise of this module's full round trip, not just
     /// each piece in isolation: generate a 5778K black body with
     /// atmospheric notches, use it as the measuring illuminant for a
     /// synthetic "measured" curve, back-derive reflectance, then predict

@@ -24,12 +24,11 @@
 //! something is, matters: tabbing or clicking from one field straight to
 //! another changes the focused id in the same frame the value itself may
 //! not yet have, so that transition - not just a return to zero focus -
-//! has to count as a gesture boundary too. An earlier version only
-//! checked "is anything focused", which meant moving between fields
-//! without ever fully blurring never closed out the previous edit:
-//! everything merged into one giant uncommitted gesture that a single
-//! Undo discarded in one shot, with nothing ever reaching the committed
-//! stack for Redo to restore.
+//! has to count as a gesture boundary too. Checking only "is anything
+//! focused" would let moving between fields without ever fully blurring
+//! merge everything into one giant uncommitted gesture: a single Undo
+//! would discard it in one shot, with nothing ever reaching the
+//! committed stack for Redo to restore.
 
 use egui::Id;
 
@@ -78,16 +77,16 @@ impl<T: Clone + PartialEq> UndoManager<T> {
         }
 
         // A gesture ends when either: focus just moved *away* from a
-        // prior target (covers tabbing/clicking straight from one
-        // field to another, even if that same frame still carries the
+        // prior target (covers tabbing/clicking straight from one field
+        // to another, even if that same frame still carries the
         // outgoing field's last keystroke) - or focus is idle and the
         // value has stopped changing (covers a just-finished drag, which
         // never sets focus at all). Focus merely *arriving* (`None` ->
         // `Some`) must NOT itself close a gesture that started on this
         // same frame - that's the edit just beginning, not ending.
-        let focus_left_a_real_target = self.last_focused.is_some() && focused != self.last_focused;
+        let focus_left_a_prior_target = self.last_focused.is_some() && focused != self.last_focused;
         let idle_and_settled = focused.is_none() && !changed_this_frame;
-        if self.pending_before.is_some() && (focus_left_a_real_target || idle_and_settled) {
+        if self.pending_before.is_some() && (focus_left_a_prior_target || idle_and_settled) {
             let before = self.pending_before.take().unwrap();
             self.undo_stack.push(before);
             if self.undo_stack.len() > MAX_HISTORY {
@@ -211,17 +210,17 @@ mod tests {
         mgr.undo(&mut set);
         assert_eq!(
             set.colorspace_curves[0].points[0].1, 0.5,
-            "now a real committed step"
+            "now a committed step"
         );
     }
 
     #[test]
     fn tabbing_between_fields_without_full_blur_still_closes_each_edit() {
-        // Reproduces the reported bug: editing field A, then moving
-        // straight to field B (never passing through "nothing focused"
-        // in between) must still close out A's edit as its own
-        // committed step - not merge into one giant pending blob that a
-        // single Undo discards wholesale with nothing left for Redo.
+        // Editing field A, then moving straight to field B (never
+        // passing through "nothing focused" in between) must still
+        // close out A's edit as its own committed step - not merge into
+        // one giant pending blob that a single Undo discards wholesale
+        // with nothing left for Redo.
         let mut mgr: UndoManager<CurveSet> = UndoManager::default();
         let mut set = set_with_point("s", 500.0, 0.5);
         mgr.observe(&set, None);
@@ -230,7 +229,7 @@ mod tests {
         set.colorspace_curves[0].omega = Some(0.05);
         mgr.observe(&set, widget(1));
 
-        // Tab to field B: focus moves this frame, but (as in real usage)
+        // Tab to field B: focus moves this frame, but (as in practice)
         // B's own value doesn't change until a later frame when the user
         // actually starts typing into it.
         mgr.observe(&set, widget(2));
