@@ -139,8 +139,12 @@ mod tests {
 
     fn set_with_point(name: &str, wl: f64, v: f64) -> CurveSet {
         let mut s = CurveSet::new(name);
-        s.colorspace_curves
+        s.curves
             .push(SpectralCurve::new("c", CurveType::Sensitivity).with_points(vec![(wl, v)]));
+        // One single-regime colorspace so the set has the pool+regimes
+        // shape the app's editing surfaces produce (regimes own the
+        // opponent contrasts).
+        s.regimes.push(xenovision_core::curve_set::Regime::new("Colorspace", vec![0]));
         s
     }
 
@@ -165,11 +169,11 @@ mod tests {
 
         // Simulate a drag: value changes over several frames (one
         // gesture; point dragging never sets keyboard focus).
-        set.colorspace_curves[0].points[0].1 = 0.6;
+        set.curves[0].points[0].1 = 0.6;
         mgr.observe(&set, None);
-        set.colorspace_curves[0].points[0].1 = 0.7;
+        set.curves[0].points[0].1 = 0.7;
         mgr.observe(&set, None);
-        set.colorspace_curves[0].points[0].1 = 0.8;
+        set.curves[0].points[0].1 = 0.8;
         mgr.observe(&set, None);
         // Settle: one more frame with no further change.
         mgr.observe(&set, None);
@@ -178,7 +182,7 @@ mod tests {
         let before_undo = set.clone();
         mgr.undo(&mut set);
         assert_eq!(
-            set.colorspace_curves[0].points[0].1, 0.5,
+            set.curves[0].points[0].1, 0.5,
             "should revert to pre-gesture value"
         );
         assert!(mgr.can_redo());
@@ -192,7 +196,7 @@ mod tests {
         let mut set = set_with_point("s", 500.0, 0.5);
         mgr.observe(&set, None);
 
-        set.colorspace_curves[0].points[0].1 = 0.9;
+        set.curves[0].points[0].1 = 0.9;
         mgr.observe(&set, widget(1)); // changed, and focused (typing)
         mgr.observe(&set, widget(1)); // unchanged, same field still focused -> not settled
 
@@ -200,8 +204,9 @@ mod tests {
         // right now must discard the whole in-progress edit in one go
         // (back to 0.5), not step through intermediate frames.
         let mut probe = set.clone();
+// Undo discards the in-progress edit... probe renames handled below.
         mgr.undo(&mut probe);
-        assert_eq!(probe.colorspace_curves[0].points[0].1, 0.5);
+        assert_eq!(probe.curves[0].points[0].1, 0.5);
         assert!(!mgr.can_redo(), "a discarded pending edit isn't redoable");
 
         // Un-discard: re-establish the pending edit and let it settle.
@@ -209,7 +214,7 @@ mod tests {
         mgr.observe(&set, None); // focus released -> settles now
         mgr.undo(&mut set);
         assert_eq!(
-            set.colorspace_curves[0].points[0].1, 0.5,
+            set.curves[0].points[0].1, 0.5,
             "now a committed step"
         );
     }
@@ -226,7 +231,7 @@ mod tests {
         mgr.observe(&set, None);
 
         // Edit field A (omega) - typing changes the value while focused on A.
-        set.colorspace_curves[0].omega = Some(0.05);
+        set.curves[0].omega = Some(0.05);
         mgr.observe(&set, widget(1));
 
         // Tab to field B: focus moves this frame, but (as in practice)
@@ -239,32 +244,32 @@ mod tests {
         assert!(mgr.can_undo());
 
         // Now type into B.
-        set.colorspace_curves[0].eta = Some(16.0);
+        set.curves[0].eta = Some(16.0);
         mgr.observe(&set, widget(2));
 
         // Settle B's edit too (e.g. click away entirely).
         mgr.observe(&set, None);
 
-        assert_eq!(set.colorspace_curves[0].omega, Some(0.05));
-        assert_eq!(set.colorspace_curves[0].eta, Some(16.0));
+        assert_eq!(set.curves[0].omega, Some(0.05));
+        assert_eq!(set.curves[0].eta, Some(16.0));
 
         mgr.undo(&mut set); // undoes B (eta)
-        assert_eq!(set.colorspace_curves[0].eta, None);
+        assert_eq!(set.curves[0].eta, None);
         assert_eq!(
-            set.colorspace_curves[0].omega,
+            set.curves[0].omega,
             Some(0.05),
             "A's edit must survive"
         );
 
         mgr.undo(&mut set); // undoes A (omega)
-        assert_eq!(set.colorspace_curves[0].omega, None);
+        assert_eq!(set.curves[0].omega, None);
         assert!(!mgr.can_undo());
 
         // And both should be redoable in order.
         mgr.redo(&mut set);
-        assert_eq!(set.colorspace_curves[0].omega, Some(0.05));
+        assert_eq!(set.curves[0].omega, Some(0.05));
         mgr.redo(&mut set);
-        assert_eq!(set.colorspace_curves[0].eta, Some(16.0));
+        assert_eq!(set.curves[0].eta, Some(16.0));
     }
 
     #[test]
@@ -273,11 +278,11 @@ mod tests {
         let mut set = set_with_point("s", 500.0, 0.5);
         mgr.observe(&set, None);
 
-        set.colorspace_curves[0].points[0].1 = 0.6; // mid-gesture, never settles
+        set.curves[0].points[0].1 = 0.6; // mid-gesture, never settles
         mgr.observe(&set, None);
 
         mgr.undo(&mut set);
-        assert_eq!(set.colorspace_curves[0].points[0].1, 0.5);
+        assert_eq!(set.curves[0].points[0].1, 0.5);
         assert!(!mgr.can_redo(), "a discarded pending edit isn't redoable");
     }
 
@@ -292,17 +297,19 @@ mod tests {
         mgr.observe(&set, None);
 
         // 1. "Point edit" surface (a drag: no focus involved).
-        set.colorspace_curves[0].points[0].1 = 0.6;
+        set.curves[0].points[0].1 = 0.6;
         mgr.observe(&set, None);
         mgr.observe(&set, None); // settle
 
         // 2. "Noise table" surface (a focused text field).
-        set.colorspace_curves[0].omega = Some(0.05);
+        set.curves[0].omega = Some(0.05);
         mgr.observe(&set, widget(1));
         mgr.observe(&set, None); // blur -> settle
 
         // 3. "Opponent contrast" surface (another focused field).
-        set.opponent_contrasts
+        set.regimes[0]
+            .opponent_contrasts
+            .get_or_insert_with(Vec::new)
             .push(xenovision_core::curve_set::OpponentContrast {
                 name: "x".to_string(),
                 weights: vec![1.0],
@@ -310,27 +317,40 @@ mod tests {
         mgr.observe(&set, widget(2));
         mgr.observe(&set, None); // blur -> settle
 
-        assert_eq!(set.colorspace_curves[0].points[0].1, 0.6);
-        assert_eq!(set.colorspace_curves[0].omega, Some(0.05));
-        assert_eq!(set.opponent_contrasts.len(), 1);
+        assert_eq!(set.curves[0].points[0].1, 0.6);
+        assert_eq!(set.curves[0].omega, Some(0.05));
+        assert_eq!(
+            set.regimes[0]
+                .opponent_contrasts
+                .as_ref()
+                .unwrap()
+                .len(),
+            1
+        );
 
         mgr.undo(&mut set); // undoes #3
-        assert_eq!(set.opponent_contrasts.len(), 0);
         assert_eq!(
-            set.colorspace_curves[0].omega,
+            set.regimes[0]
+                .opponent_contrasts
+                .as_ref()
+                .map_or(0, |v| v.len()),
+            0
+        );
+        assert_eq!(
+            set.curves[0].omega,
             Some(0.05),
             "earlier edits remain"
         );
 
         mgr.undo(&mut set); // undoes #2
-        assert_eq!(set.colorspace_curves[0].omega, None);
+        assert_eq!(set.curves[0].omega, None);
         assert_eq!(
-            set.colorspace_curves[0].points[0].1, 0.6,
+            set.curves[0].points[0].1, 0.6,
             "earlier edit remains"
         );
 
         mgr.undo(&mut set); // undoes #1
-        assert_eq!(set.colorspace_curves[0].points[0].1, 0.5);
+        assert_eq!(set.curves[0].points[0].1, 0.5);
 
         assert!(!mgr.can_undo());
     }

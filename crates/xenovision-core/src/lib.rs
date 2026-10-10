@@ -23,4 +23,4 @@ pub mod preset_store;
 pub mod sensor_presets;
 
 pub use curve::{CurveType, QuantityKind, SpectralCurve};
-pub use curve_set::{CurveSet, CurveSetError};
+pub use curve_set::{CurveSet, CurveSetError, OpponentContrast, Regime, RegimeConfig};

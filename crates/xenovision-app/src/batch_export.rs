@@ -79,11 +79,15 @@ pub fn run_export(app: &mut AppState, path: &str) -> Result<usize, String> {
         return Err("Pick a reference stimulus for the distance column first.".to_string());
     }
 
-    // One Pipeline (and the reference's own coordinates in it) built
-    // once per species here, not once per stimulus row below.
+    // One pipeline set (one per regime) built once per species here, not
+    // once per stimulus row below. Each species' columns use its dominant
+    // regime (highest regime_gain under the reference luminant, §2.2);
+    // regime-less species (mantis shrimp) contribute no columns at all -
+    // they have no luminance/chroma coordinates to export, by design.
     struct SpeciesColumn {
         name: String,
-        pipeline: std::rc::Rc<xenovision_core::pipeline::Pipeline>,
+        pipelines: std::rc::Rc<std::vec::Vec<xenovision_core::pipeline::Pipeline>>,
+        regime_idx: usize,
         reference_coords: Option<Coordinates>,
     }
     let mut columns = Vec::with_capacity(species_ids.len());
@@ -91,13 +95,22 @@ pub fn run_export(app: &mut AppState, path: &str) -> Result<usize, String> {
         let Some(set) = app.curve_sets.get(&set_id) else {
             continue;
         };
-        let pipeline = app
+        let pipelines = app
             .transform_cache
             .get_or_build(set, luminant_id, &luminant, 1.0);
+        let Some((regime_idx, _)) = pipelines
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.regime_gain().total_cmp(&b.regime_gain()))
+        else {
+            continue; // no colorspace regime -> nothing to export
+        };
+        let pipeline = &pipelines[regime_idx];
         let reference_coords = reference_curve.as_ref().map(|r| pipeline.coordinates(r));
         columns.push(SpeciesColumn {
             name: set.name.clone(),
-            pipeline,
+            pipelines,
+            regime_idx,
             reference_coords,
         });
     }
@@ -111,8 +124,9 @@ pub fn run_export(app: &mut AppState, path: &str) -> Result<usize, String> {
     // Header: Stimulus, then per species: L, C1..C{n-1}, Saturation[, Distance-to-ref].
     let mut header = vec!["Stimulus".to_string()];
     for col in &columns {
+        let pipeline = &col.pipelines[col.regime_idx];
         header.push(format!("{} L", col.name));
-        for i in 1..=col.pipeline.chroma_axis_count() {
+        for i in 1..=pipeline.chroma_axis_count() {
             header.push(format!("{} C{i}", col.name));
         }
         header.push(format!("{} Saturation", col.name));
@@ -131,7 +145,8 @@ pub fn run_export(app: &mut AppState, path: &str) -> Result<usize, String> {
     for (stimulus, name) in stimuli.iter().zip(&stimulus_names) {
         let mut row = vec![csv_field(name)];
         for col in &columns {
-            let coords = col.pipeline.coordinates(stimulus);
+            let pipeline = &col.pipelines[col.regime_idx];
+            let coords = pipeline.coordinates(stimulus);
             row.push(coords.luminance.to_string());
             for c in &coords.chroma {
                 row.push(c.to_string());
@@ -139,7 +154,7 @@ pub fn run_export(app: &mut AppState, path: &str) -> Result<usize, String> {
             row.push(coords.saturation.to_string());
             if include_distance {
                 let d = col.reference_coords.as_ref().and_then(|rc| {
-                    comparison::distance(&coords, rc, metric, col.pipeline.noise())
+                    comparison::distance(&coords, rc, metric, pipeline.noise())
                 });
                 row.push(d.map(|v| v.to_string()).unwrap_or_default());
             }

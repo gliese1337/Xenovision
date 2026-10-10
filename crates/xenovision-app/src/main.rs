@@ -247,7 +247,7 @@ mod layout_tests {
     fn tiny_window_keeps_panels_usable() {
         let mut app = App::default();
         let set_id = app.state.workspace.open_tabs[0];
-        let first = app.state.curve_sets[&set_id].colorspace_curves[0];
+        let first = app.state.curve_sets[&set_id].curve_order[0];
         app.state
             .workspace
             .per_tab
@@ -282,7 +282,7 @@ mod layout_tests {
         // Select a curve so the inspector shows its full contents - the
         // widest state it has.
         let set_id = app.state.workspace.open_tabs[0];
-        let first_curve = app.state.curve_sets[&set_id].colorspace_curves[0];
+        let first_curve = app.state.curve_sets[&set_id].curve_order[0];
         app.state
             .workspace
             .per_tab

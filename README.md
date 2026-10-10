@@ -50,19 +50,19 @@ Other terms used throughout:
 | Term | Meaning |
 |---|---|
 | **Curve Set** | A named collection of receptor (Sensitivity) curves - one species' full visual system, open as a Workspace tab. |
-| **Colorspace curve** | A receptor curve that feeds into a visual system's luminance/chroma math - its "cones." Filled dot (●) in the left rail. |
-| **Isolated curve** | A receptor curve kept for reference but excluded from the colorspace math - e.g. non-color-vision photoreceptors, or (mantis shrimp) every receptor it has. Hollow dot (○). |
+| **Regime** | A named colorspace: a set of pool receptors that jointly produce luminance + chroma, with its own membership, luminance weights, and opponent contrasts. Most species have one (their whole eye); the frog has three (scotopic/mesopic/photopic, §2.3.10); a receptor can be in several. |
+| **Unaffiliated receptor** | A receptor in the pool that belongs to no regime - e.g. non-color-vision photoreceptors (swallowtail butterfly's violet/broad-band classes), or (mantis shrimp) every receptor it has. Draws a hollow dot (○) in the left rail, reported individually, never part of any luminance/chroma calculation. |
 | **ω (Weber fraction)** | Per-receptor noise term. Blank means "no data," not zero. |
 | **η (relative density)** | Per-receptor density, meaningful relative to the other receptors in the same set. Also blank-means-no-data. |
 | **w_i (luminance weight)** | How much a receptor contributes to luminance. Blank = integral-derived default; set it to override. |
 | **Receptor saturation** | The maximum signal a receptor can produce, however much power reaches it - its activation is capped at this value. Blank = no cap. Distinct from the perceptual *saturation* in Comparison's coordinate table (below). |
-| **Operating window** | The range of ambient irradiance (W/m²) a receptor operates in, as seen by that receptor (the light its own sensitivity absorbs from the reference). Below the window's minimum or above its maximum the receptor gates off; between them its gain is ~1, with soft logistic shoulders (blank = use the Curve Set's defaults; blank everywhere = always on). This is how the same eye produces different color perceptions at dim vs. bright light levels - e.g. the frog's scotopic and photopic fixtures. |
+| **Operating window** | The range of ambient irradiance (W/m²) a receptor operates in, as seen by that receptor (the light its own sensitivity absorbs from the reference). Below the window's minimum or above its maximum the receptor gates off; between them its gain is ~1, with soft logistic shoulders (blank = use the Curve Set's defaults; blank everywhere = always on). This is how the same eye produces different color perceptions at dim vs. bright light levels - e.g. the frog's scotopic/mesopic/photopic regimes. |
 | **Saturation / hue angle** | For a species with N > 2 receptors, the chroma vector's length (saturation) and its N-2 hyperspherical angles (hue) - shown alongside luminance/chroma in Comparison's coordinate table. |
 | **ΔS** | Vorobyev-Osorio perceptual distance (JND units) - needs ω and η on every receptor of the system being evaluated. |
 
 ## Getting started
 
-On first launch, Xenovision bootstraps its built-in library - twelve species
+On first launch, Xenovision bootstraps its built-in library - eleven species
 fixtures - into your system's per-user data directory
 (`xenovision/fixtures/*.json`, one file per species) and opens one Workspace
 tab per species. The stimulus library starts seeded with three example
@@ -84,12 +84,16 @@ to start an empty one. Click a tab's **×** to close it; if it has unsaved
 changes, you're asked to confirm first (closing a tab really does discard
 its data, unlike closing a whole window).
 
-**Left rail** - a Colorspace/Isolated toggle picks which graph the center
-pane shows, independent of selecting a curve. Below it, the two curve lists.
-Click a name to select it; click it again to deselect. **+ New Curve** adds
-a blank Sensitivity-typed curve to the colorspace list - Workspace only ever
-creates receptor curves; stimulus curves and their generators/importers live
-in the Stimulus Editor window instead (see below).
+**Left rail** - "Graph shows" pills pick what the center graph displays:
+"All pooled" (every receptor) or one named regime's members. Below them, the
+single receptor-pool list. A filled dot (●) marks a receptor that belongs to at
+least one regime; a hollow dot (○) marks an unaffiliated one (in no regime),
+with an "Unaffiliated" group repeated below for quick access. Click a name to
+select it; click it again to deselect. **+ New Curve** adds a blank
+Sensitivity-typed receptor to the pool (joining the regime you're currently
+viewing, or starting unaffiliated if the graph shows "All pooled") - Workspace
+only ever creates receptor curves; stimulus curves and their
+generators/importers live in the Stimulus Editor window instead (see below).
 
 **The graph** - every curve in the active list is drawn, but only the
 *selected* curve's points are draggable (this is deliberate, to stop a drag
@@ -105,33 +109,43 @@ wavelength labels in nm. Gestures:
 | `Delete` / `Backspace` | Remove the selected point |
 | Click a name in the legend row | Select it, or deselect if already selected |
 
-Below the graph, while viewing **Colorspace**: a second "subjective
-spectrum" bar, showing what this species' own receptor mix renders each
-wavelength as (each colorspace curve's display color, blended per
-wavelength by its response there, brightness-scaled by the total response) -
+Below the graph, a "subjective spectrum" bar spans the whole receptor
+pool: what this species' own receptor mix renders each wavelength as (each
+receptor's display color, blended per wavelength by its response there,
+brightness-scaled by the total response) regardless of the graph filter -
 compare it against the physical-wavelength gradient bar above it to see how
-a species' perception diverges from the raw spectrum. Beneath that, the
-opponent-contrast table (signed weight per receptor; leave empty for the
-automatic per-receptor fallback) and a remove-curve button. Isolated view
-shows an add-isolated-curve button instead, since opponent contrasts don't
-apply there. Undo/redo at the bottom covers every editing surface on the tab
-as one shared history (`Ctrl+Z` / `Ctrl+Shift+Z` or `Ctrl+Y`).
+a species' perception diverges from the raw spectrum.
 
-With more than 32 colorspace curves, an amber note warns that each edit to
-the set pauses briefly (around a second or more) while its adaptation matrix
-is re-derived. Smaller systems take milliseconds.
+Beneath the graph, the **Colorspace regimes** panel: add/rename/remove
+regimes, a membership table (which pool receptors belong to which regime),
+each regime's derived light-level band (the intersection of its members'
+operating windows), per-regime luminance-weight overrides and opponent-contrast
+definitions (signed weight per member; leave empty for the automatic
+per-receptor fallback), and the natural-scene auto-generator for one regime's
+contrasts. Structural warnings live here too: an empty regime, unaffiliated
+receptors, or disjoint member windows (a regime that can never turn on).
+A **Remove this curve** button under the graph deletes the selected receptor
+from the pool and every regime at once. Undo/redo at the bottom covers every
+editing surface on the tab as one shared history (`Ctrl+Z` / `Ctrl+Shift+Z` or
+`Ctrl+Y`).
+
+With more than 32 receptors visible in the graph, an amber note warns that
+each edit to the set pauses briefly (around a second or more) while its
+adaptation matrices are re-derived. Smaller systems take milliseconds.
 
 **Right inspector** - curve name; a numeric wavelength/value editor for
 whichever point is currently selected on the graph (not a table of every
-point - that overwhelmed the panel and was removed); noise/luminance fields
-(colorspace curves only: ω, η, w_i); receptor saturation (every curve,
-colorspace or isolated); the receptor's operating window (W/m² seen-irradiance
-min/max + shoulder softness, with the effective window - including the set's
-defaults - shown beneath); the set's operating-window defaults (always shown,
-top of the inspector; applies to any receptor without its own window); free-form
-metadata; and an amber validation flag if η is set on *some but not all*
-colorspace curves in the set, or if any operating window is malformed
-(min ≥ max, or a non-positive bound).
+point - that overwhelmed the panel and was removed); the receptor's regime
+membership (or "unaffiliated"); noise/luminance fields (ω, η, w_i, for any
+receptor); receptor saturation; the receptor's operating window (W/m²
+seen-irradiance min/max + shoulder softness, with the effective window -
+including the set's defaults - shown beneath); the set's operating-window
+defaults (always shown, top of the inspector; applies to any receptor
+without its own window); free-form metadata; and amber validation flags if
+η is set on *some but not all* regime members in the set, if any operating
+window is malformed (min ≥ max, or a non-positive bound), if a regime is
+empty, if receptors are unaffiliated, or if a regime's member windows are
+disjoint (it can never be active at any light level).
 
 **File menu**
 
@@ -324,20 +338,20 @@ the Stimulus Editor (e.g. "Edit a copy of..." an existing one, or a blank
 curve) rather than repurposing a receptor curve.
 
 **ΔS says "unavailable" for a species.** - It needs ω and η set on every one
-of that species' colorspace curves. Check the inspector's noise fields, or
-look for the amber partial-coverage warning.
+of that species' colorspace regime members. Check the inspector's noise fields,
+or look for the amber partial-coverage warning.
 
 ## Built-in species reference
 
-Twelve fixtures load as Workspace tabs on first run:
+Eleven fixtures load as Workspace tabs on first run:
 
 - Human (*Homo sapiens*)
 - Dog (*Canis lupus familiaris*)
 - Cat (*Felis catus*)
 - Mouse (*Mus musculus*)
 - Goldfish (*Carassius auratus*)
-- Frog (*Rana* spp.) - Scotopic
-- Frog (*Rana* spp.) - Photopic
+- Frog (*Rana* spp.) - one tab carrying all three regimes: Scotopic
+  (rods-only), Mesopic (all five receptors), Photopic (cones-only)
 - Pigeon (*Columba livia*)
 - Honeybee (*Apis mellifera*)
 - Swallowtail Butterfly (*Papilio xuthus*)
@@ -346,7 +360,10 @@ Twelve fixtures load as Workspace tabs on first run:
 
 Each is independently editable and independently restorable to its shipped
 defaults from Workspace's File menu. Mantis Shrimp is the one notable
-structural outlier: all twelve of its receptor classes live in **Isolated**,
-by design - the fixture models the hypothesis that they aren't combined into
-a human-style opponent colorspace at all, so its luminance and chroma are
-always exactly zero.
+structural outlier: it declares **no colorspace regime at all**, by design -
+the fixture models the hypothesis that its 12 receptor classes are never
+combined into a human-style opponent colorspace, so every receptor reports
+individually and its luminance and chroma are always exactly zero. Frog is
+the other structural outlier, in the opposite direction: three regimes over
+one shared receptor pool, so that at any light level one of them (the
+dominant, per-receptor-gain-max) drives the comparison.

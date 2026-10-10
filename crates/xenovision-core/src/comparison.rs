@@ -126,7 +126,10 @@ pub struct SpeciesDeltaSColumn {
 /// evaluating the same `spectra` against the same shared `illuminant`
 /// (§6.4's shared-reference-environment constraint - one `illuminant`
 /// used for every species' `Pipeline::build` call here) through that
-/// species' own independent pipeline (§6.3.1).
+/// species' own independent pipeline (§6.3.1). Each species is judged
+/// through the regime its caller selected (the Comparison window passes
+/// the dominant/active one); species with no regimes produce a `None`
+/// matrix like any other missing-noise case.
 pub fn cross_species_delta_s(
     species: &[CurveSet],
     spectra: &[SpectralCurve],
@@ -136,7 +139,7 @@ pub fn cross_species_delta_s(
     species
         .iter()
         .map(|set| {
-            let pipeline = Pipeline::build(set.clone(), illuminant, step_nm);
+            let pipeline = Pipeline::build(set.default_regime_config(), illuminant, step_nm);
             let noise = pipeline.noise().map(|n| n.to_vec());
             let coords: Vec<Coordinates> =
                 spectra.iter().map(|s| pipeline.coordinates(s)).collect();
@@ -276,7 +279,8 @@ mod tests {
             b.omega = Some(0.1);
             b.eta = Some(1.0);
         }
-        set.colorspace_curves = vec![a, b];
+        set.curves = vec![a, b];
+        set.regimes = vec![crate::curve_set::Regime::new("Dichromat", vec![0, 1])];
         set
     }
 

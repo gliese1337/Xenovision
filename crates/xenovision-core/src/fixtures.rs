@@ -2,16 +2,28 @@
 //! (loading/saving these as separate user-editable files, §8.3) lives in
 //! `fixture_library`, built on top of the plain in-memory `CurveSet`
 //! values this module returns.
+//!
+//! Every fixture is a single receptor pool (`curves`) plus one or more
+//! colorspace regimes (`regimes`). A single-regime species declares its
+//! one colorspace (e.g. "Trichromat"); the frog - whose visual system
+//! genuinely spans three regimes (scotopic/mesopic/photopic, §2.3.10) -
+//! declares all three in one fixture, replacing the old two-file
+//! scotopic/photopic split; mantis shrimp declares none (§10.2).
 
 use crate::blackbody;
 use crate::curve::{CurveType, QuantityKind, SpectralCurve};
-use crate::curve_set::{CurveSet, OpponentContrast};
+use crate::curve_set::{CurveSet, OpponentContrast, Regime};
 use crate::govardovskii::{self, Chromophore};
 use crate::oil_droplet;
 
 const WL_MIN: f64 = 300.0;
 const WL_MAX: f64 = 750.0;
 const STEP: f64 = 5.0;
+
+/// Regime name used by the single-regime species fixtures (every
+/// "plain one colorspace" species in this app gets this one regime; the
+/// frog's three are special-cased in `frog()`).
+const SINGLE_COLOR_VISION_REGIMES: [&str; 4] = ["Trichromat", "Dichromat", "Tetrachromat", "Color vision tetrachromat"];
 
 fn cone_curve(name: &str, lambda_max: f64, citation: &str) -> SpectralCurve {
     cone_curve_with(Chromophore::A1, name, lambda_max, citation)
@@ -57,7 +69,8 @@ fn note_generic_fallback(set: &mut CurveSet) {
 }
 
 /// Human (*Homo sapiens*) trichromat, §2.3.1: S/M/L cones at
-/// 420/530/560nm. Curve order is [S, M, L].
+/// 420/530/560nm. Pool order is [S, M, L]; one "Trichromat" regime over
+/// all three.
 ///
 /// Luminance weighting, Weber fraction, and relative density are all
 /// illustrative placeholders, not precise literature citations for this
@@ -84,12 +97,14 @@ pub fn human() -> CurveSet {
     l_cone.omega = Some(0.05);
     l_cone.eta = Some(32.0);
 
-    set.colorspace_curves = vec![s_cone, m_cone, l_cone];
+    set.curves = vec![s_cone, m_cone, l_cone];
 
     // Literature-standard red-green and blue-yellow contrasts (§2.3.1),
     // exercised through real CurveSet data per §8.2's representability
-    // requirement.
-    set.opponent_contrasts = vec![
+    // requirement. `opponent_contrasts` lives on the regime - the
+    // colorspace it defines - not the set (§2.2).
+    set.regimes = vec![Regime::new(SINGLE_COLOR_VISION_REGIMES[0], vec![0, 1, 2])];
+    set.regimes[0].opponent_contrasts = Some(vec![
         OpponentContrast {
             name: "L - M (red-green)".to_string(),
             weights: vec![0.0, -1.0, 1.0],
@@ -98,7 +113,7 @@ pub fn human() -> CurveSet {
             name: "S - (M+L)/2 (blue-yellow)".to_string(),
             weights: vec![1.0, -0.5, -0.5],
         },
-    ];
+    ]);
 
     set.metadata.insert(
         "note".to_string(),
@@ -123,7 +138,7 @@ pub fn human() -> CurveSet {
 /// generic fallback.
 pub fn dog() -> CurveSet {
     let mut set = CurveSet::new("Dog (Canis lupus familiaris)");
-    set.colorspace_curves = vec![
+    set.curves = vec![
         cone_curve(
             "S-cone",
             432.0,
@@ -135,6 +150,7 @@ pub fn dog() -> CurveSet {
             "Neitz, Geist & Jacobs 1989; Jacobs et al. 1993",
         ),
     ];
+    set.regimes = vec![Regime::new(SINGLE_COLOR_VISION_REGIMES[1], vec![0, 1])];
     set.metadata.insert(
         "note".to_string(),
         "Functional dichromat, analogous to a human blue-yellow-only system".to_string(),
@@ -152,7 +168,7 @@ pub fn dog() -> CurveSet {
 /// every other species in this app.
 pub fn cat() -> CurveSet {
     let mut set = CurveSet::new("Cat (Felis catus)");
-    set.colorspace_curves = vec![
+    set.curves = vec![
         cone_curve(
             "450nm mechanism",
             450.0,
@@ -169,6 +185,7 @@ pub fn cat() -> CurveSet {
             "Cat retinal ganglion cell spectral sensitivity studies",
         ),
     ];
+    set.regimes = vec![Regime::new(SINGLE_COLOR_VISION_REGIMES[0], vec![0, 1, 2])];
     set.metadata.insert(
         "note".to_string(),
         "Cats are frequently characterized behaviorally as functional dichromats, with the \
@@ -205,9 +222,9 @@ pub fn honeybee() -> CurveSet {
     green.eta = Some(4.0); // most abundant per literature's L-dominant framing
     green.luminance_weight = Some(0.8); // explicit L-dominant override, not the integral default
 
-    set.colorspace_curves = vec![uv, blue, green];
-
-    set.opponent_contrasts = vec![
+    set.curves = vec![uv, blue, green];
+    set.regimes = vec![Regime::new(SINGLE_COLOR_VISION_REGIMES[0], vec![0, 1, 2])];
+    set.regimes[0].opponent_contrasts = Some(vec![
         OpponentContrast {
             name: "UV - Blue".to_string(),
             weights: vec![1.0, -1.0, 0.0],
@@ -216,7 +233,7 @@ pub fn honeybee() -> CurveSet {
             name: "Green - (UV+Blue)/2".to_string(),
             weights: vec![-0.5, -0.5, 1.0],
         },
-    ];
+    ]);
 
     set.metadata.insert(
         "note".to_string(),
@@ -245,9 +262,9 @@ pub fn honeybee() -> CurveSet {
 /// classes, each an opsin absorption curve composited with that cone's
 /// oil droplet transmittance filter (§2.3.5 - oil droplets act as sharp
 /// short-wavelength cut-offs, not a simple shifted lambda_max). The raw
-/// opsin and droplet curves are kept isolated for inspection; only the
-/// 4 composited effective curves are in the colorspace, pipeline-facing
-/// set.
+/// opsin and droplet curves stay in the pool outside any colorspace
+/// regime for inspection; only the 4 composited effective curves are
+/// members of the "Tetrachromat" regime the pipeline faces.
 pub fn pigeon() -> CurveSet {
     let mut set = CurveSet::new("Pigeon (Columba livia)");
 
@@ -260,7 +277,8 @@ pub fn pigeon() -> CurveSet {
     ];
 
     let mut effective_curves = Vec::new();
-    let mut isolated_curves = Vec::new();
+    let mut raw_opsins = Vec::new();
+    let mut droplets = Vec::new();
     for (opsin_name, opsin_lmax, droplet_name, cutoff) in classes {
         let opsin = cone_curve(
             opsin_name,
@@ -294,17 +312,26 @@ pub fn pigeon() -> CurveSet {
         );
 
         effective_curves.push(effective);
-        isolated_curves.push(opsin);
-        isolated_curves.push(droplet);
+        raw_opsins.push(opsin);
+        droplets.push(droplet);
     }
 
-    set.colorspace_curves = effective_curves;
-    set.isolated_curves = isolated_curves;
+    // Pool: 4 effective curves first (the regime members), then the 8
+    // raw opsin + droplet curves outside any regime.
+    let mut pool = effective_curves;
+    for (opsin, droplet) in raw_opsins.into_iter().zip(droplets) {
+        pool.push(opsin);
+        pool.push(droplet);
+    }
+    set.curves = pool;
+    set.regimes = vec![Regime::new(SINGLE_COLOR_VISION_REGIMES[2], vec![0, 1, 2, 3])];
 
     set.metadata.insert(
         "note".to_string(),
         "Red-field droplet values used as the representative default (pigeons have two retinal \
-         fields - red and yellow - with different droplet populations, not modeled separately)."
+         fields - red and yellow - with different droplet populations, not modeled separately). \
+         The 4 composited effective curves are the Tetrachromat regime's members; the raw opsin \
+         and droplet curves stay in the pool outside any colorspace regime for inspection."
             .to_string(),
     );
     note_generic_fallback(&mut set);
@@ -317,7 +344,7 @@ pub fn pigeon() -> CurveSet {
 /// default A1 - goldfish use vitamin-A2-based visual pigments.
 pub fn goldfish() -> CurveSet {
     let mut set = CurveSet::new("Goldfish (Carassius auratus)");
-    set.colorspace_curves = vec![
+    set.curves = vec![
         cone_curve_with(
             Chromophore::A2,
             "UV receptor",
@@ -343,6 +370,7 @@ pub fn goldfish() -> CurveSet {
             "Palacios, Goldsmith & Bernard 1998; Hárosi 1976",
         ),
     ];
+    set.regimes = vec![Regime::new(SINGLE_COLOR_VISION_REGIMES[2], vec![0, 1, 2, 3])];
     set.metadata.insert(
         "note".to_string(),
         "Curve shapes use the Govardovskii A2 (porphyropsin) template, not the default A1 - \
@@ -362,11 +390,12 @@ pub fn goldfish() -> CurveSet {
 /// rather than pigeon's N=4.
 pub fn penguin() -> CurveSet {
     let mut set = CurveSet::new("Penguin (Spheniscus humboldti)");
-    set.colorspace_curves = vec![
+    set.curves = vec![
         cone_curve("Violet-sensitive (SWS1)", 403.0, "Bowmaker & Martin 1985"),
         cone_curve("S/blue receptor", 450.0, "Bowmaker & Martin 1985"),
         cone_curve("L/green receptor", 543.0, "Bowmaker & Martin 1985"),
     ];
+    set.regimes = vec![Regime::new(SINGLE_COLOR_VISION_REGIMES[0], vec![0, 1, 2])];
     set.metadata.insert(
         "note".to_string(),
         "Penguins have lost the UV-sensitive and long-wavelength-sensitive cone classes most \
@@ -386,10 +415,11 @@ pub fn penguin() -> CurveSet {
 /// average by default.
 pub fn mouse() -> CurveSet {
     let mut set = CurveSet::new("Mouse (Mus musculus)");
-    set.colorspace_curves = vec![
+    set.curves = vec![
         cone_curve("S-cone (UV)", 360.0, "Jacobs, Neitz & Deegan 1991"),
         cone_curve("M-cone (green)", 508.0, "Jacobs, Neitz & Deegan 1991"),
     ];
+    set.regimes = vec![Regime::new(SINGLE_COLOR_VISION_REGIMES[1], vec![0, 1])];
     set.metadata.insert(
         "note".to_string(),
         "Behaviorally-confirmed dichromatic discrimination, though a dorsal-ventral density \
@@ -406,17 +436,18 @@ pub fn mouse() -> CurveSet {
 }
 
 /// Swallowtail butterfly (*Papilio xuthus*), §2.3.9: tetrachromat for
-/// color vision (UV/blue/green/red at 360/460/520/600nm - the
-/// colorspace, pipeline-facing set), plus two further measured receptor
-/// classes that participate in non-chromatic vision (motion processing)
-/// rather than color opponency, stored as isolated curves instead of
-/// the colorspace set per §2.2.4's exception-free "every receptor in
-/// the colorspace set contributes to both luminance and chroma" rule -
-/// demonstrating `CurveSet::isolated_curves` rather than requiring an
-/// exception to that rule.
+/// color vision (UV/blue/green/red at 360/460/520/600nm - the "Color
+/// vision tetrachromat" regime's members), plus two further measured
+/// receptor classes that participate in non-chromatic vision (motion
+/// processing) rather than color opponency. The violet and broad-band
+/// receptors stay in the pool *outside any colorspace regime* per
+/// §2.2.4's exception-free "every colorspace receptor contributes to
+/// both luminance and chroma" rule - demonstrating pool-wide
+/// unaffiliated receptors rather than requiring an exception to that
+/// rule.
 pub fn butterfly() -> CurveSet {
     let mut set = CurveSet::new("Swallowtail Butterfly (Papilio xuthus)");
-    set.colorspace_curves = vec![
+    set.curves = vec![
         cone_curve("UV", 360.0, "Arikawa et al. 1999; Koshitaka et al. 2008"),
         cone_curve("Blue", 460.0, "Arikawa et al. 1999; Koshitaka et al. 2008"),
         cone_curve("Green", 520.0, "Arikawa et al. 1999; Koshitaka et al. 2008"),
@@ -429,7 +460,8 @@ pub fn butterfly() -> CurveSet {
         "A narrow-band receptor derived from the same opsin as the UV receptor, spectrally \
          narrowed by a UV-absorbing filtering pigment rather than a distinct opsin gene. \
          Approximated here with the standard template at the same lambda_max - the narrowing \
-         itself isn't modeled, since this curve is isolated and not used by the pipeline."
+         itself isn't modeled, since this curve is outside any colorspace regime and not used \
+         by the color-vision pipeline."
             .to_string(),
     );
 
@@ -456,122 +488,117 @@ pub fn butterfly() -> CurveSet {
             .to_string(),
     );
 
-    set.isolated_curves = vec![violet, broad_band];
+    set.curves.push(violet);
+    set.curves.push(broad_band);
+    set.regimes = vec![Regime::new(SINGLE_COLOR_VISION_REGIMES[3], vec![0, 1, 2, 3])];
 
     set.metadata.insert(
         "note".to_string(),
-        "The 4 color-vision receptors (UV/Blue/Green/Red) are the colorspace Curve Set every \
-         calculation operates on. Two further measured receptor classes (violet, broad-band) \
-         are documented in the literature as participating in non-chromatic vision rather than \
-         color opponency, and are kept isolated for completeness - not part of the N=4 the \
-         pipeline sees, per §2.2.4's exception-free all-receptors-contribute rule."
+        "The 4 color-vision receptors (UV/Blue/Green/Red) are the 'Color vision tetrachromat' \
+         regime every color calculation operates on. Two further measured receptor classes \
+         (violet, broad-band) are documented in the literature as participating in non-chromatic \
+         vision rather than color opponency, and are kept in the pool outside any colorspace \
+         regime for completeness - not part of the N=4 the color-vision pipeline sees, per \
+         §2.2.4's exception-free all-colorspace-receptors-contribute rule."
             .to_string(),
     );
     note_generic_fallback(&mut set);
     set
 }
 
-/// Frog (*Rana* spp.) scotopic (dim-light, rod-based) system, §2.3.10:
-/// green/red rods at 433/502nm. Entirely independent of `frog_photopic`
-/// below - no mesopic (rod+cone combination) calculation is modeled,
-/// per the design doc's explicit scoping note.
-pub fn frog_scotopic() -> CurveSet {
-    let mut set = CurveSet::new("Frog (Rana spp.) — Scotopic");
-    set.colorspace_curves = vec![
-        cone_curve(
-            "Green rod",
-            433.0,
-            "Denton & Wyllie 1955; Yovanovich et al. 2017",
-        ),
-        cone_curve(
-            "Red rod",
-            502.0,
-            "Denton & Wyllie 1955; Yovanovich et al. 2017",
-        ),
-    ];
-    // Rod-based regime: active when the light each rod actually absorbs
-    // (E_i = ∫S·I dλ) is at dim scotopic irradiances, gated off once the
-    // light gets bright (§2.2's operating window). Units are objective
+/// Frog (*Rana* spp.), §2.3.10 - *one* three-regime fixture standing in
+/// for the old two-file scotopic/photopic split. Pool order:
+/// [Green rod (433), Red rod (502), Blue cone (431), Middle cone (502),
+/// Red cone (580)].
+///
+/// Three structurally distinct regimes (§2.2), all driven by the
+/// per-receptor operating windows (§2.2's gating) each class carries:
+/// - **Scotopic** [rods]: dim-light, rod-based colorspace.
+/// - **Mesopic** [all five]: rods *and* cones jointly - a real third
+///   colorspace that peaks only in the overlap band where both receptor
+///   classes' windows contain their seen irradiance, not a blend of the
+///   other two regimes' outputs. Its activity is the product of its
+///   members' gains (`regime_gain = ∏ g_i`), so it collapses (≈0)
+///   outside that band.
+/// - **Photopic** [cones]: bright-light, cone-based colorspace.
+///
+/// The windows overlap where rods' 3e-2 upper bound meets cones' 1e-2
+/// lower bound - the mesopic band (~1e-2..3e-2 W/m² seen).
+pub fn frog() -> CurveSet {
+    let mut set = CurveSet::new("Frog (Rana spp.)");
+
+    // Rods: operate at dim scotopic irradiances, gated off in bright
+    // light (§2.2's operating window). Cones: require bright photopic
+    // irradiances, no upper bound (receptor `saturation` caps the signal
+    // instead). Windows are PER-CURVE here because the two classes have
+    // opposite bounds - the set has no default. All units are objective
     // physical irradiance (W/m², treating luminant curves as spectral
     // irradiance in W/m²/nm) - deliberately not a human-photometric
     // measure, since the model is for the frog's own visual system.
     // Bounds are ILLUSTRATIVE, not calibrated photometric values.
-    set.illumination_min = Some(1e-6);
-    set.illumination_max = Some(3e-2);
-    set.illumination_softness = Some(0.5);
-    set.metadata.insert(
-        "note".to_string(),
-        "The dual rod system is functionally active at the same (very low) light levels - the \
-         behavioral precondition for the scotopic colour discrimination documented in the cited \
-         studies. Entirely independent of the photopic fixture: separate file, no shared \
-         calculation state, per the design doc's explicit no-mesopic-combination scoping. \
-         The set-level operating window gates each rod on the irradiance it actually absorbs \
-         from the reference light (E_i = ∫S·I dλ, W/m²): operating gain ~1 below ~1e-5 W/m², \
-         ramping off through the mesopic band (~0.01-0.1 W/m², where the photopic fixture's \
-         window begins). Window bounds are illustrative W/m² values, not calibrated \
-         photometric measurements."
-            .to_string(),
-    );
-    note_generic_fallback(&mut set);
-    set
-}
-
-/// Frog (*Rana* spp.) photopic (bright-light, cone-based) system,
-/// §2.3.10: blue/middle/red cones at 431/502/580nm - N=3 as the
-/// documented default, though the 502nm middle cone's existence is
-/// contested in some species/studies (see metadata). Entirely
-/// independent of `frog_scotopic` above.
-pub fn frog_photopic() -> CurveSet {
-    let mut set = CurveSet::new("Frog (Rana spp.) — Photopic");
-    set.colorspace_curves = vec![
+    set.curves = vec![
+        cone_curve(
+            "Green rod",
+            433.0,
+            "Denton & Wyllie 1955; Yovanovich et al. 2017",
+        )
+        .with_illumination_window(Some(1e-6), Some(3e-2))
+        .with_illumination_softness(0.5),
+        cone_curve(
+            "Red rod",
+            502.0,
+            "Denton & Wyllie 1955; Yovanovich et al. 2017",
+        )
+        .with_illumination_window(Some(1e-6), Some(3e-2))
+        .with_illumination_softness(0.5),
         cone_curve(
             "Blue cone",
             431.0,
             "Koskelainen, Hemilä & Donner 1994; Liebman & Entine 1968",
-        ),
+        )
+        .with_illumination_window(Some(1e-2), None)
+        .with_illumination_softness(0.5),
         cone_curve(
             "Middle/green cone",
             502.0,
             "Koskelainen, Hemilä & Donner 1994; Liebman & Entine 1968",
-        ),
+        )
+        .with_illumination_window(Some(1e-2), None)
+        .with_illumination_softness(0.5),
         cone_curve(
             "Red cone",
             580.0,
             "Koskelainen, Hemilä & Donner 1994; Liebman & Entine 1968",
-        ),
+        )
+        .with_illumination_window(Some(1e-2), None)
+        .with_illumination_softness(0.5),
     ];
-    // Cone-based regime: requires the light each cone actually absorbs
-    // (E_i = ∫S·I dλ) to be at bright photopic irradiances, gated off in
-    // dim light (§2.2's operating window). Units are objective physical
-    // irradiance (W/m², treating luminant curves as spectral irradiance
-    // in W/m²/nm) - not a human-photometric measure. No upper bound:
-    // cones keep operating in arbitrarily bright light (unlike rods,
-    // which is why the scotopic fixture has a max); receptor
-    // `saturation` caps the transduced signal instead. The overlap with
-    // the scotopic fixture's window (roughly 0.01-0.1 W/m² seen) is the
-    // mesopic band. Bounds are ILLUSTRATIVE, not calibrated photometric
-    // values.
-    set.illumination_min = Some(1e-2);
-    set.illumination_max = None;
-    set.illumination_softness = Some(0.5);
+
+    set.regimes = vec![
+        Regime::new("Scotopic", vec![0, 1]),
+        Regime::new("Mesopic", vec![0, 1, 2, 3, 4]),
+        Regime::new("Photopic", vec![2, 3, 4]),
+    ];
+
     set.metadata.insert(
         "note".to_string(),
-        "Entirely independent of the scotopic fixture: separate file, no shared calculation \
-         state, per the design doc's two-independent-systems framing (§2.3.10). The set-level \
-         operating window gates each cone on the irradiance it actually absorbs from the \
-         reference light (E_i = ∫S·I dλ, W/m²): gain ~1 in bright ambient light, gated off \
-         below the dim (scotopic) irradiances the rods handle. No upper window bound - cones \
-         don't stop operating in bright light, receptor `saturation` caps the signal instead. \
-         Window bounds are illustrative W/m² values, not calibrated photometric measurements."
+        "One three-regime fixture replacing the old separate scotopic/photopic files: the rods \
+         (Scotopic), the cones (Photopic), and both jointly (Mesopic) are three structurally \
+         distinct colorspaces, each with its own membership, dimensionality (1/4/2 chroma \
+         channels), and operating windows. Regime activity is the product of the members' \
+         gains, so the Mesopic regime is active only in the band (~1e-2..3e-2 W/m² seen) \
+         where both rod and cone windows contain the light each receptor actually absorbs \
+         (E_i = ∫S·I dλ, W/m²). Window bounds are illustrative W/m² values, not calibrated \
+         photometric measurements."
             .to_string(),
     );
     set.metadata.insert(
         "contested_cone_note".to_string(),
         "The 502nm middle cone's status is contested: confirmed via microspectrophotometry in \
          some species/studies, reported absent/contentious in others (e.g. R. temporaria per the \
-         Koskelainen lineage of work). This N=3 default is a documented assumption to verify per \
-         species/study, not a settled fact - fork via Save As and remove this cone to model the \
-         2-cone (red+blue) alternative."
+         Koskelainen lineage of work). This N=3 cones default is a documented assumption to \
+         verify per species/study, not a settled fact - fork via Save As and remove this cone \
+         (and its membership in the Mesopic/Photopic regimes) to model the 2-cone alternative."
             .to_string(),
     );
     note_generic_fallback(&mut set);
@@ -581,27 +608,19 @@ pub fn frog_photopic() -> CurveSet {
 /// Mantis shrimp (Stomatopoda, e.g. *Odontodactylus scyllarus*), §10.2:
 /// the motivating real-world example for that TODO - a species with far
 /// *more* photoreceptor classes than any other fixture here (12, vs.
-/// pigeon/goldfish's 4), yet **none** of them participate in the §2.2.4
-/// opponent-process colorspace construction every other species'
-/// colorspace set does. Behavioral/electrophysiological work (notably
-/// Thoen et al. 2014's "chunk" hypothesis) found mantis shrimp color
-/// *discrimination* performance is markedly worse than a human
-/// trichromat's despite the much larger receptor count - the leading
-/// explanation is that each receptor class is read out largely
-/// independently (e.g. via rapid eye-scanning/temporal comparison across
-/// the midband rows) rather than combined through opponent-process
-/// channels the way vertebrate color vision in every other fixture here
-/// works. This fixture models that directly: the entire receptor set
-/// lives in `isolated_curves`; the colorspace set is **empty** - the
-/// first fixture with zero colorspace receptors, exercising the N=0
-/// path through `Pipeline`/`derive_adaptation_matrix` (both handle it
-/// generically, same as the existing N=1 monochromat case -
-/// no species-specific code needed here either, consistent with §8.2).
-/// §10.1's activation display is what makes this fixture's data visible
-/// at all: `Pipeline::coordinates` always returns `luminance = 0.0`,
-/// `chroma = []` for it by construction (there's nothing in the
-/// colorspace set to weight), so the only meaningful output is each
-/// isolated curve's individual raw activation.
+/// pigeon/goldfish's 4), yet **none** of them belong to a colorspace
+/// regime. Behavioral/electrophysiological work (notably Thoen et al.
+/// 2014's "chunk" hypothesis) found mantis shrimp color *discrimination*
+/// performance is markedly worse than a human trichromat's despite the
+/// much larger receptor count - the leading explanation is that each
+/// receptor class is read out largely independently (e.g. via rapid
+/// eye-scanning/temporal comparison across the midband rows) rather
+/// than combined through opponent-process channels the way vertebrate
+/// color vision in every other fixture here works. This fixture models
+/// that directly: `regimes` is **empty** - the first fixture with no
+/// colorspace at all, exercising the no-regime path through the app
+/// (every receptor reported individually, §10.1/§10.2 - no species-
+/// specific code needed, consistent with §8.2).
 pub fn mantis_shrimp() -> CurveSet {
     let mut set = CurveSet::new("Mantis Shrimp (Stomatopoda)");
     let classes = [
@@ -618,7 +637,7 @@ pub fn mantis_shrimp() -> CurveSet {
         ("Midband row 7", 600.0),
         ("Midband row 8", 625.0),
     ];
-    set.isolated_curves = classes
+    set.curves = classes
         .iter()
         .map(|(name, lmax)| {
             cone_curve(
@@ -628,41 +647,41 @@ pub fn mantis_shrimp() -> CurveSet {
             )
         })
         .collect();
-    set.colorspace_curves = Vec::new();
+    set.regimes = Vec::new();
 
     set.metadata.insert(
         "note".to_string(),
         "12 photoreceptor classes (illustrative λmax values spanning UV to red - the headline \
          '12 types' figure is well-established, but these specific wavelengths weren't \
          re-verified digit-by-digit against primary microspectrophotometry data, same confidence \
-         caveat as every other fixture's approximated values). All 12 live in isolated_curves; \
-         the colorspace set is intentionally empty - no species in this app has more raw \
-         photoreceptor diversity, and none has less opponent-process participation. Luminance \
-         and chroma are always exactly 0 for this fixture by construction (nothing in the \
-         colorspace set to weight) - the direct consequence of modeling the hypothesis that \
+         caveat as every other fixture's approximated values). None of the 12 belongs to any \
+         colorspace regime: no species in this app has more raw photoreceptor diversity, and \
+         none has less colorspace participation. Luminance and chroma are always exactly 0 \
+         (nothing to weight or oppose) - the direct consequence of modeling the hypothesis that \
          these channels aren't combined into a human-style opponent colorspace at all. The \
-         individual receptor activations (via Pipeline::colorspace_activations/isolated_activations, \
-         §10.1) are this fixture's only meaningful output."
+         individual receptor activations/operating states (§10.1) are this fixture's only \
+         meaningful output."
             .to_string(),
     );
     set.metadata.insert(
         "opponent_pairing_note".to_string(),
-        "Not applicable: zero colorspace receptors means zero opponent contrasts by \
+        "Not applicable: zero colorspace regimes means zero opponent contrasts by \
          construction, not an unmodeled literature mechanism."
             .to_string(),
     );
     set.metadata.insert(
         "noise_data_note".to_string(),
-        "Not applicable: ΔS needs activity in the colorspace set, which is empty here by design."
+        "Not applicable: ΔS needs a colorspace regime, and there is none here by design."
             .to_string(),
     );
     set
 }
 
-/// All 12 fixtures this app ships with (human + the 9 species/systems
-/// above + frog's 2nd regime + mantis shrimp) - the embedded pristine
-/// defaults `fixture_library`'s "restore defaults" regenerates the
-/// user-visible files from.
+/// All 11 fixtures this app ships with (human + 9 species/systems +
+/// frog + mantis shrimp, the frog's old two files now merged into one
+/// three-regime fixture) - the embedded pristine defaults
+/// `fixture_library`'s "restore defaults" regenerates the user-visible
+/// files from.
 pub fn builtin_fixtures() -> Vec<CurveSet> {
     vec![
         human(),
@@ -674,8 +693,7 @@ pub fn builtin_fixtures() -> Vec<CurveSet> {
         penguin(),
         mouse(),
         butterfly(),
-        frog_scotopic(),
-        frog_photopic(),
+        frog(),
         mantis_shrimp(),
     ]
 }
@@ -706,13 +724,52 @@ pub fn default_solar_illuminant() -> SpectralCurve {
 mod tests {
     use super::*;
 
+    /// Builds a Pipeline for `set`'s first regime against a flat
+    /// illuminant and checks it produces exactly `expected_chroma`
+    /// chroma channels - the generic shape check every single-regime
+    /// species fixture below needs (N receptors -> N-1 chroma channels),
+    /// run through the pipeline rather than just inspecting the
+    /// CurveSet's shape, so it also catches a fixture that fails to
+    /// actually build (e.g. a curve with no points).
+    fn assert_pipeline_chroma_count(set: CurveSet, expected_chroma: usize) {
+        let illuminant = SpectralCurve::new("flat", CurveType::Illumination)
+            .with_points(vec![(WL_MIN, 1.0), (WL_MAX, 1.0)]);
+        let n_receptors = set.curves.len();
+        let pipeline = crate::pipeline::Pipeline::build(
+            set.default_regime_config(),
+            &illuminant,
+            1.0,
+        );
+        assert_eq!(pipeline.chroma_axis_count(), expected_chroma);
+        assert!(
+            n_receptors >= expected_chroma + 1 || n_receptors == 0,
+            "N={n_receptors} should give N-1 chroma channels"
+        );
+    }
+
+    /// Chroma count for one specific regime (multi-regime species like
+    /// the frog), through the same generic build path.
+    fn assert_regime_chroma_count(set: &CurveSet, regime_idx: usize, expected_chroma: usize) {
+        let illuminant = SpectralCurve::new("flat", CurveType::Illumination)
+            .with_points(vec![(WL_MIN, 1.0), (WL_MAX, 1.0)]);
+        let pipeline = crate::pipeline::Pipeline::build(
+            set.regime_config(&set.regimes[regime_idx]),
+            &illuminant,
+            1.0,
+        );
+        assert_eq!(pipeline.chroma_axis_count(), expected_chroma);
+    }
+
     #[test]
     fn human_fixture_has_three_cones_in_s_m_l_order() {
         let set = human();
-        assert_eq!(set.colorspace_curves.len(), 3);
-        assert_eq!(set.colorspace_curves[0].name, "S-cone");
-        assert_eq!(set.colorspace_curves[1].name, "M-cone");
-        assert_eq!(set.colorspace_curves[2].name, "L-cone");
+        assert_eq!(set.curves.len(), 3);
+        assert_eq!(set.curves[0].name, "S-cone");
+        assert_eq!(set.curves[1].name, "M-cone");
+        assert_eq!(set.curves[2].name, "L-cone");
+        assert_eq!(set.regimes.len(), 1, "single colorspace regime");
+        assert_eq!(set.regimes[0].name, "Trichromat");
+        assert_eq!(set.regimes[0].curves, vec![0, 1, 2]);
     }
 
     #[test]
@@ -728,18 +785,29 @@ mod tests {
         let set = human();
         assert!(!set.has_partial_eta_coverage());
         assert!(set.receptor_noise().is_some());
-        assert_eq!(set.opponent_contrasts.len(), 2);
+        let contrasts = set.regimes[0].opponent_contrasts.as_ref().unwrap();
+        assert_eq!(contrasts.len(), 2);
+        let config = set.regime_config(&set.regimes[0]);
         assert_eq!(
-            set.candidate_rows(),
+            config.candidate_rows,
             vec![vec![0.0, -1.0, 1.0], vec![1.0, -0.5, -0.5]]
+        );
+        assert_eq!(
+            contrasts[0].weights,
+            vec![0.0, -1.0, 1.0],
+            "regime owns the contrasts; the set no longer carries them"
         );
     }
 
     #[test]
     fn human_fixture_luminance_weights_are_l_m_dominant() {
         let set = human();
+        // Pool-wide luminance weighting (§4.2.3): explicit curve-level
+        // overrides, all three in the one regime.
         let weights = set.luminance_weights(1.0);
         assert_eq!(weights, vec![0.0, 0.4, 0.6]);
+        let config = set.regime_config(&set.regimes[0]);
+        assert_eq!(config.luminance_weights, vec![0.0, 0.4, 0.6]);
     }
 
     #[test]
@@ -755,33 +823,20 @@ mod tests {
         assert!((400.0..=650.0).contains(&peak_wl), "peak at {peak_wl}nm");
     }
 
-    /// Builds a Pipeline for `set` against a flat illuminant and checks
-    /// it produces exactly `expected_chroma` chroma channels - the
-    /// generic shape check every species fixture below needs (N
-    /// receptors -> N-1 chroma channels), run through the pipeline
-    /// rather than just inspecting the CurveSet's shape, so it also
-    /// catches a fixture that fails to actually build (e.g. a curve
-    /// with no points).
-    fn assert_pipeline_chroma_count(set: CurveSet, expected_chroma: usize) {
-        let illuminant = SpectralCurve::new("flat", CurveType::Illumination)
-            .with_points(vec![(WL_MIN, 1.0), (WL_MAX, 1.0)]);
-        let pipeline = crate::pipeline::Pipeline::build(set, &illuminant, 1.0);
-        assert_eq!(pipeline.chroma_axis_count(), expected_chroma);
-    }
-
     #[test]
     fn dog_is_n2_dichromat() {
         let set = dog();
-        assert_eq!(set.colorspace_curves.len(), 2);
+        assert_eq!(set.curves.len(), 2);
+        assert_eq!(set.regimes[0].name, "Dichromat");
         assert_pipeline_chroma_count(set, 1);
     }
 
     #[test]
     fn cat_is_n3_with_500nm_mechanism_present_in_chroma() {
         let set = cat();
-        assert_eq!(set.colorspace_curves.len(), 3);
+        assert_eq!(set.curves.len(), 3);
         assert!(
-            set.colorspace_curves.iter().any(|c| c.name.contains("500")),
+            set.curves.iter().any(|c| c.name.contains("500")),
             "500nm mechanism must not be silently dropped"
         );
         assert_pipeline_chroma_count(set, 2);
@@ -790,9 +845,9 @@ mod tests {
     #[test]
     fn honeybee_is_n3_with_literature_contrasts_and_noise_overriding_fallback() {
         let set = honeybee();
-        assert_eq!(set.colorspace_curves.len(), 3);
+        assert_eq!(set.curves.len(), 3);
         assert_eq!(
-            set.opponent_contrasts.len(),
+            set.regimes[0].opponent_contrasts.as_ref().unwrap().len(),
             2,
             "literature contrasts must override the generic fallback"
         );
@@ -807,15 +862,18 @@ mod tests {
     #[test]
     fn pigeon_is_n4_with_effective_curves_narrower_than_raw_opsins() {
         let set = pigeon();
+        assert_eq!(set.curves.len(), 12, "4 effective + 8 raw opsin/droplet curves in the pool");
         assert_eq!(
-            set.colorspace_curves.len(),
-            4,
-            "4 effective (opsin x droplet) curves in the colorspace set"
+            set.regimes[0].curves,
+            vec![0, 1, 2, 3],
+            "only the 4 effective curves are regime members"
         );
-        assert_eq!(
-            set.isolated_curves.len(),
-            8,
-            "4 raw opsins + 4 droplets kept isolated"
+        // The 8 non-member curves belong to no regime (unaffiliated).
+        assert!(
+            (0..set.curves.len() as u64)
+                .filter(|i| set.regimes[0].curves.contains(i))
+                .count()
+                == 4
         );
         assert_pipeline_chroma_count(set.clone(), 3);
 
@@ -823,14 +881,14 @@ mod tests {
         // short-wavelength point must be suppressed relative to the raw
         // opsin, since its orange/red droplet should have cut it off.
         let raw_lws = set
-            .isolated_curves
+            .curves
             .iter()
             .find(|c| c.name == "Long-wave (LWS)")
             .unwrap();
         let effective_lws = set
-            .colorspace_curves
+            .curves
             .iter()
-            .find(|c| c.name.starts_with("Long-wave (LWS)"))
+            .find(|c| c.name.starts_with("Long-wave (LWS)") && !c.name.is_empty() && c.name != "Long-wave (LWS)")
             .unwrap();
         let probe_wl = 450.0;
         let raw_v = raw_lws.value_at(probe_wl).unwrap();
@@ -844,14 +902,14 @@ mod tests {
     #[test]
     fn goldfish_is_n4_using_a2_template_distinct_from_a1() {
         let set = goldfish();
-        assert_eq!(set.colorspace_curves.len(), 4);
+        assert_eq!(set.curves.len(), 4);
         assert_pipeline_chroma_count(set.clone(), 3);
 
         // A2-generated curve must differ from what A1 would have produced
         // at the same lambda_max (spot-checked away from the shared peak,
         // same reasoning as govardovskii::tests::a2_template_differs...).
         let m_cone = set
-            .colorspace_curves
+            .curves
             .iter()
             .find(|c| c.name.contains("M/green"))
             .unwrap();
@@ -871,7 +929,7 @@ mod tests {
     #[test]
     fn penguin_is_n3_reduced_tetrachromat() {
         let set = penguin();
-        assert_eq!(set.colorspace_curves.len(), 3);
+        assert_eq!(set.curves.len(), 3);
         assert_pipeline_chroma_count(set, 2);
     }
 
@@ -879,160 +937,259 @@ mod tests {
     fn mouse_is_n2_dichromat_structurally_like_dog() {
         let dog_set = dog();
         let mouse_set = mouse();
-        assert_eq!(
-            mouse_set.colorspace_curves.len(),
-            dog_set.colorspace_curves.len()
-        );
+        assert_eq!(mouse_set.curves.len(), dog_set.curves.len());
         assert_pipeline_chroma_count(mouse_set, 1);
     }
 
     #[test]
     fn butterfly_pipeline_sees_exactly_4_not_6_receptors() {
         let set = butterfly();
+        assert_eq!(set.curves.len(), 6, "4 color-vision + 2 unaffiliated");
         assert_eq!(
-            set.colorspace_curves.len(),
-            4,
-            "only the 4 color-vision receptors are in the colorspace set"
+            set.regimes[0].curves,
+            vec![0, 1, 2, 3],
+            "only the 4 color-vision receptors are regime members"
         );
-        assert_eq!(
-            set.isolated_curves.len(),
-            2,
-            "violet + broad-band are isolated"
+        assert!(
+            set.curves[4].name == "Violet (non-color-vision)"
+                && set.curves[5].name == "Broad-band (non-color-vision)"
+        );
+        assert!(
+            !set
+                .regimes
+                .iter()
+                .flat_map(|r| r.curves.iter())
+                .any(|&i| i >= 4),
+            "violet + broad-band belong to no regime"
         );
         assert_pipeline_chroma_count(set, 3);
     }
 
     #[test]
-    fn frog_scotopic_and_photopic_are_independent_n2_and_n3() {
-        let scotopic = frog_scotopic();
-        let photopic = frog_photopic();
-        assert_eq!(scotopic.colorspace_curves.len(), 2);
-        assert_eq!(photopic.colorspace_curves.len(), 3);
-        assert_ne!(scotopic.name, photopic.name);
-        // Independence is structural (two separate CurveSet values, no
-        // shared mutable state) - demonstrated by just being able to
-        // build and use both without one affecting the other.
-        assert_pipeline_chroma_count(scotopic, 1);
-        assert_pipeline_chroma_count(photopic, 2);
+    fn frog_has_three_regimes_with_distinct_membership() {
+        let set = frog();
+        assert_eq!(set.curves.len(), 5, "2 rods + 3 cones");
+        assert_eq!(set.regimes.len(), 3);
+        assert_eq!(set.regimes[0].name, "Scotopic");
+        assert_eq!(set.regimes[0].curves, vec![0, 1]);
+        assert_eq!(
+            set.regimes[1].name, "Mesopic",
+            "the mesopic regime is its own colorspace, not a scotopic/photopic blend"
+        );
+        assert_eq!(set.regimes[1].curves, vec![0, 1, 2, 3, 4]);
+        assert_eq!(set.regimes[2].name, "Photopic");
+        assert_eq!(set.regimes[2].curves, vec![2, 3, 4]);
+        // Dimensionality follows membership: 2 receptors -> 1 chroma
+        // axis, 5 -> 4, 3 -> 2.
+        assert_regime_chroma_count(&set, 0, 1);
+        assert_regime_chroma_count(&set, 1, 4);
+        assert_regime_chroma_count(&set, 2, 2);
+    }
+
+    /// One pipeline per regime, all three same illuminant.
+    fn frog_pipelines(power: f64) -> [crate::pipeline::Pipeline; 3] {
+        let set = frog();
+        let illuminant = SpectralCurve::new("flat", CurveType::Illumination)
+            .with_points(vec![(WL_MIN, power), (WL_MAX, power)]);
+        [
+            crate::pipeline::Pipeline::build(set.regime_config(&set.regimes[0]), &illuminant, 1.0),
+            crate::pipeline::Pipeline::build(set.regime_config(&set.regimes[1]), &illuminant, 1.0),
+            crate::pipeline::Pipeline::build(set.regime_config(&set.regimes[2]), &illuminant, 1.0),
+        ]
     }
 
     #[test]
     fn frog_regimes_gate_the_other_way_at_opposite_light_levels() {
-        // §2.2's whole point for this species pair: under a dim light
-        // only the scotopic system operates, under a bright one only the
-        // photopic system does. Each receptor gates on the irradiance it
-        // actually sees from the reference light (E_i = ∫S_i·I dλ, W/m²
-        // under the W/m²/nm convention), via the fixtures' set-level
-        // windows and the real Pipeline. The flat illuminant at amplitude
-        // `power` gives each cone/rod a seen irradiance ≈ (template area
-        // ~tens of nm)·power, so the chosen powers land decisively
-        // inside/outside the regimes regardless of the exact template.
-        let scotopic = frog_scotopic();
-        let photopic = frog_photopic();
-        let illuminant_at = |power: f64| {
-            SpectralCurve::new("flat", CurveType::Illumination)
-                .with_points(vec![(WL_MIN, power), (WL_MAX, power)])
-        };
-
-        // power 1e-7 -> seen ≈ 1e-6..1e-5 W/m²: inside the scotopic
-        // window [1e-6, 3e-2], far below the photopic min 1e-2.
-        let dim = crate::pipeline::Pipeline::build(scotopic.clone(), &illuminant_at(1e-7), 1.0);
-        let dim_phot =
-            crate::pipeline::Pipeline::build(photopic.clone(), &illuminant_at(1e-7), 1.0);
+        // §2.2's whole point for this species: under dim light only the
+        // scotopic regime operates, under bright light only the photopic
+        // one does, and the mesopic regime - which needs *every* member's
+        // window to contain its seen irradiance - collapses at both ends
+        // but peaks (and dominates) in the overlap band. Each receptor
+        // gates on the irradiance it actually sees from the reference
+        // light (E_i = ∫S_i·I dλ, W/m² under the W/m²/nm convention),
+        // via the per-curve windows and the real Pipeline. The flat
+        // illuminant at amplitude `power` gives each rod/cone a seen
+        // irradiance ≈ (template area ~tens of nm)·power, so the chosen
+        // powers land decisively inside/outside the windows regardless of
+        // the exact template area.
+        let [scotopic, mesopic, photopic] = frog_pipelines(1e-7);
         assert!(
-            dim.is_active(),
+            scotopic.is_active(),
             "scotopic should be active in dim light (seen W/m²: {:?})",
-            dim.colorspace_seen_irradiances()
+            scotopic.seen_irradiances()
         );
         assert!(
-            !dim_phot.is_active(),
+            !photopic.is_active(),
             "photopic should be gated off in dim light (seen W/m²: {:?})",
-            dim_phot.colorspace_seen_irradiances()
+            photopic.seen_irradiances()
+        );
+        // The mesopic regime in dim light: the rods are operating, but
+        // the cones are gated off, so the product over all five members
+        // is ~0 while `is_active` (any member on) is still true - the
+        // blurry-threshold notion a single pipeline can never expose.
+        assert!(mesopic.is_active(), "individual rods are on even in dim light");
+        assert!(
+            mesopic.regime_gain() < 1e-3,
+            "but the whole-regime product collapses: {}",
+            mesopic.regime_gain()
+        );
+        assert!(
+            scotopic.regime_gain() > mesopic.regime_gain()
+                && scotopic.regime_gain() > photopic.regime_gain(),
+            "scotopic dominates in dim light: s={} m={} p={}",
+            scotopic.regime_gain(),
+            mesopic.regime_gain(),
+            photopic.regime_gain()
         );
 
-        // power 1.0 -> seen ≈ tens of W/m²: way above the scotopic max
-        // 3e-2, well inside the (unbounded-above) photopic window.
-        let bright = crate::pipeline::Pipeline::build(scotopic.clone(), &illuminant_at(1.0), 1.0);
-        let bright_phot =
-            crate::pipeline::Pipeline::build(photopic.clone(), &illuminant_at(1.0), 1.0);
+        let [scotopic, mesopic, photopic] = frog_pipelines(1.0);
         assert!(
-            !bright.is_active(),
+            !scotopic.is_active(),
             "scotopic should be gated off in bright light (seen W/m²: {:?})",
-            bright.colorspace_seen_irradiances()
+            scotopic.seen_irradiances()
         );
         assert!(
-            bright_phot.is_active(),
+            photopic.is_active(),
             "photopic should be active in bright light (seen W/m²: {:?})",
-            bright_phot.colorspace_seen_irradiances()
+            photopic.seen_irradiances()
+        );
+        assert!(
+            mesopic.regime_gain() < 1e-3,
+            "mesopic collapses in bright light too (cones on, rods off): {}",
+            mesopic.regime_gain()
+        );
+        assert!(
+            photopic.regime_gain() > mesopic.regime_gain()
+                && photopic.regime_gain() > scotopic.regime_gain(),
+            "photopic dominates in bright light: p={} m={} s={}",
+            photopic.regime_gain(),
+            mesopic.regime_gain(),
+            scotopic.regime_gain()
+        );
+
+        // Mid-band: pick the illuminant power from the photopic
+        // pipeline's own geometry so the cones sit mid-window (2e-2
+        // W/m² seen, in [1e-2, ∞)), scaling the *seen* levels rather
+        // than guessing template areas. Rods then see ~the same 2e-2
+        // (their templates are the same order of area), which is inside
+        // [1e-6, 3e-2] but below 3e-2's shoulder - both classes on.
+        let set = frog();
+        let ref_illuminant = SpectralCurve::new("flat", CurveType::Illumination)
+            .with_points(vec![(WL_MIN, 1.0), (WL_MAX, 1.0)]);
+        let photopic_pipe = crate::pipeline::Pipeline::build(
+            set.regime_config(&set.regimes[2]),
+            &ref_illuminant,
+            1.0,
+        );
+        let cone_area_at_unit = photopic_pipe.seen_irradiances()[0];
+        let mid_power = 2e-2 / cone_area_at_unit;
+
+        let [scotopic, mesopic, photopic] = frog_pipelines(mid_power);
+        assert!(
+            scotopic.is_active() && photopic.is_active(),
+            "in the mesopic band both receptor classes operate (s: {:?}, p: {:?})",
+            scotopic.response_gains(),
+            photopic.response_gains()
+        );
+        // The mesopic regime needs *every one of its five members'*
+        // windows to contain its seen irradiance, so its product is
+        // necessarily below either single-class product in the band -
+        // what it does better than anything is peak *here*. It collapses
+        // at both ends (a member class is gated off) and is substantively
+        // active only mid-band.
+        let dim_mesopic = frog_pipelines(1e-7)[1].regime_gain();
+        let bright_mesopic = frog_pipelines(1.0)[1].regime_gain();
+        assert!(
+            mesopic.regime_gain() > 0.05
+                && mesopic.regime_gain() > dim_mesopic
+                && mesopic.regime_gain() > bright_mesopic,
+            "the mesopic regime is most active in its band: m={} (dim {dim_mesopic}, bright {bright_mesopic})",
+            mesopic.regime_gain()
         );
     }
 
     #[test]
     fn frog_photopic_fork_removing_contested_cone_yields_independent_n2_set() {
-        // The documented Save-As workflow: fork photopic, drop the
-        // contested middle cone, confirm the result is an independent
-        // N=2 set that doesn't touch the original.
-        let original = frog_photopic();
+        // The documented Save-As workflow: fork the whole frog, drop the
+        // contested middle cone from the pool and every regime that
+        // listed it, confirm the photopic subset is an independent N=2
+        // set that doesn't touch the original.
+        let original = frog();
         let mut forked = original.clone();
-        forked.name = "Frog (Rana spp.) — Photopic, 2-cone variant".to_string();
+        forked.name = "Frog (Rana spp.) — 2-cone photopic variant".to_string();
         let idx = forked
-            .colorspace_curves
+            .curves
             .iter()
             .position(|c| c.name.contains("Middle"))
             .unwrap();
-        forked.colorspace_curves.remove(idx);
+        forked.curves.remove(idx);
+        for r in forked.regimes.iter_mut() {
+            r.curves.retain(|&i| i as usize != idx);
+            for i in r.curves.iter_mut() {
+                if *i as usize > idx {
+                    *i -= 1;
+                }
+            }
+        }
 
-        assert_eq!(forked.colorspace_curves.len(), 2);
+        let photopic_idx = forked.regimes.iter().position(|r| r.name == "Photopic").unwrap();
         assert_eq!(
-            original.colorspace_curves.len(),
+            forked.regimes[photopic_idx].curves.len(),
+            2,
+            "photopic now a 2-cone colorspace"
+        );
+        assert_eq!(
+            original.regimes[2].curves.len(),
             3,
             "the original must be untouched"
         );
-        assert_pipeline_chroma_count(forked, 1);
+        // Pool still holds the 2 remaining rods too; the photopic regime
+        // correctly skips them (indices 2,3 -> blue + red cones).
+        assert_eq!(forked.regimes[photopic_idx].curves, vec![2, 3]);
+        assert_regime_chroma_count(&forked, photopic_idx as usize, 1);
     }
 
     #[test]
-    fn mantis_shrimp_is_n0_all_isolated_curves() {
+    fn mantis_shrimp_has_no_colorspace_regimes_at_all() {
         let set = mantis_shrimp();
-        assert_eq!(
-            set.colorspace_curves.len(),
-            0,
-            "colorspace set must be empty by design"
+        assert_eq!(set.curves.len(), 12);
+        assert!(
+            set.regimes.is_empty(),
+            "zero colorspace regimes by design"
         );
-        assert_eq!(set.isolated_curves.len(), 12);
 
-        // Builds a Pipeline with zero colorspace curves without
-        // panicking (the N=0 path through derive_adaptation_matrix),
-        // and produces the degenerate-but-correct zero luminance/chroma
-        // this fixture's whole premise depends on.
-        assert_pipeline_chroma_count(set.clone(), 0);
+        // The app builds no pipeline for a regime-less species; the
+        // degenerate default config still builds without panicking (the
+        // N=0 path), and reports zero luminance/chroma as this fixture's
+        // whole premise requires.
         let illuminant = SpectralCurve::new("flat", CurveType::Illumination)
             .with_points(vec![(WL_MIN, 1.0), (WL_MAX, 1.0)]);
-        let pipeline = crate::pipeline::Pipeline::build(set, &illuminant, 1.0);
+        let pipeline =
+            crate::pipeline::Pipeline::build(set.default_regime_config(), &illuminant, 1.0);
         let stimulus = SpectralCurve::new("test", CurveType::Reflectance)
             .with_points(vec![(400.0, 0.5), (700.0, 0.5)]);
         let coords = pipeline.coordinates(&stimulus);
         assert_eq!(coords.luminance, 0.0);
         assert_eq!(coords.chroma, Vec::<f64>::new());
-        assert_eq!(
-            pipeline.noise(),
-            None,
-            "ΔS must be unavailable, not fabricated"
-        );
+        assert_eq!(pipeline.noise(), None, "ΔS must be unavailable, not fabricated");
+        assert!(!pipeline.is_active());
 
-        // The actually-meaningful output: individual receptor
-        // activations are still computable and finite for all 12
-        // isolated curves.
-        let activations = pipeline.isolated_activations(&stimulus);
+        // The actually-meaningful output: every receptor reported
+        // individually (pool-wide gains + raw activations) is finite.
+        let seen = crate::pipeline::seen_irradiances_for(&set.curves, &illuminant, 1.0);
+        let gains = set.receptor_gains(&seen);
+        assert_eq!(gains.len(), 12);
+        assert!(gains.iter().all(|g| *g == 1.0), "no windows anywhere");
+        let activations =
+            crate::pipeline::raw_activations_with_gains(&set.curves, &gains, &stimulus, 1.0);
         assert_eq!(activations.len(), 12);
         assert!(activations.iter().all(|v| v.is_finite()));
-        assert_eq!(pipeline.isolated_curve_names().len(), 12);
     }
 
     #[test]
-    fn all_12_builtin_fixtures_load_and_have_distinct_names() {
+    fn all_11_builtin_fixtures_load_and_have_distinct_names() {
         let fixtures = builtin_fixtures();
-        assert_eq!(fixtures.len(), 12);
+        assert_eq!(fixtures.len(), 11, "frog's two files merged into one");
         let mut names: Vec<&str> = fixtures.iter().map(|f| f.name.as_str()).collect();
         names.sort();
         names.dedup();
@@ -1042,11 +1199,17 @@ mod tests {
             "every fixture must have a distinct name"
         );
         for set in &fixtures {
-            // Mantis shrimp (§10.2) is the one deliberate exception: zero
-            // colorspace curves, all 12 receptors isolated instead.
             assert!(
-                !set.colorspace_curves.is_empty() || !set.isolated_curves.is_empty(),
-                "{} has no curves anywhere",
+                !set.curves.is_empty(),
+                "{} has no receptors",
+                set.name
+            );
+            // The exact set can be a regime-less species (mantis) or a
+            // single/multi-regime one - never both empty membership and
+            // empty regimes simultaneously with nothing to show.
+            assert!(
+                !set.regimes.iter().all(|r| r.curves.is_empty()) || set.regimes.is_empty(),
+                "{} keeps only empty regimes around",
                 set.name
             );
         }
@@ -1055,21 +1218,39 @@ mod tests {
     #[test]
     fn representability_audit_no_fixture_needs_species_specific_pipeline_code() {
         // The practical verification of §8.2's representability claim:
-        // every fixture must build a working Pipeline through the exact
-        // same generic path, with no special-casing by name anywhere in
-        // this test (if one fixture needed different handling, this loop
-        // itself would have to branch on species - it doesn't).
+        // every fixture's *every* regime must build a working Pipeline
+        // through the exact same generic path, with no special-casing by
+        // name anywhere in this test (if one fixture needed different
+        // handling, this loop itself would have to branch on species -
+        // it doesn't). Regime-less species (mantis) take the degenerate
+        // default-config path with zero chroma.
         for set in builtin_fixtures() {
             let illuminant = SpectralCurve::new("flat", CurveType::Illumination)
                 .with_points(vec![(WL_MIN, 1.0), (WL_MAX, 1.0)]);
-            let name = set.name.clone();
-            let n = set.colorspace_curves.len();
-            let pipeline = crate::pipeline::Pipeline::build(set, &illuminant, 1.0);
-            assert_eq!(
-                pipeline.chroma_axis_count(),
-                n.saturating_sub(1),
-                "{name}: expected N-1 chroma channels"
-            );
+            if set.regimes.is_empty() {
+                let pipeline = crate::pipeline::Pipeline::build(
+                    set.default_regime_config(),
+                    &illuminant,
+                    1.0,
+                );
+                assert_eq!(pipeline.chroma_axis_count(), 0, "{}", set.name);
+                continue;
+            }
+            for (i, regime) in set.regimes.iter().enumerate() {
+                let n = set.regime_config(regime).curves.len();
+                let pipeline = crate::pipeline::Pipeline::build(
+                    set.regime_config(regime),
+                    &illuminant,
+                    1.0,
+                );
+                assert_eq!(
+                    pipeline.chroma_axis_count(),
+                    n.saturating_sub(1),
+                    "{} regime {i} ({}): expected N-1 chroma channels",
+                    set.name,
+                    regime.name
+                );
+            }
         }
     }
 }

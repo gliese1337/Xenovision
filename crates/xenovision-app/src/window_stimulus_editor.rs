@@ -565,7 +565,7 @@ fn editor_panel(ui: &mut egui::Ui, app: &mut AppState) {
         if ui.button("Save As...").clicked() {
             let entry = app.stimulus_curves.get_mut(&id).unwrap();
             let mut set = xenovision_core::CurveSet::new(entry.curve.name.clone());
-            set.colorspace_curves = vec![entry.curve.clone()];
+            set.curves = vec![entry.curve.clone()];
             app.stimulus_editor.status = match set.save_to_file(&app.stimulus_editor.save_path_buf)
             {
                 Ok(()) => {

@@ -111,7 +111,7 @@ pub fn delete_fixture(name: &str) -> std::io::Result<()> {
     delete_fixture_in(&fixtures_dir(), name)
 }
 
-/// Overwrites the on-disk files for the 12 built-in fixtures back to
+/// Overwrites the on-disk files for the 11 built-in fixtures back to
 /// their pristine defaults (§8.3's recovery mechanism). Any
 /// user-created fixtures saved under other names are left untouched.
 /// Returns the resulting full on-disk library.
@@ -149,30 +149,27 @@ mod tests {
             slug("Dog (Canis lupus familiaris)"),
             "dog_canis_lupus_familiaris"
         );
-        assert_eq!(
-            slug("Frog (Rana spp.) — Scotopic"),
-            "frog_rana_spp_scotopic"
-        );
+        assert_eq!(slug("Frog (Rana spp.)"), "frog_rana_spp");
     }
 
     #[test]
-    fn first_run_bootstraps_all_12_builtin_fixtures() {
+    fn first_run_bootstraps_all_11_builtin_fixtures() {
         let dir = scratch_dir("bootstrap");
         let loaded = load_library_from(&dir);
-        assert_eq!(loaded.len(), 12);
+        assert_eq!(loaded.len(), 11, "frog's two files are now one");
         let mut names: Vec<&str> = loaded.iter().map(|s| s.name.as_str()).collect();
         names.sort();
         names.dedup();
         assert_eq!(
             names.len(),
-            12,
+            11,
             "every bootstrapped fixture must be distinct"
         );
 
         // Loading again should read the now-populated directory back,
-        // not re-bootstrap (and still find the same 12 fixtures).
+        // not re-bootstrap (and still find the same 11 fixtures).
         let loaded_again = load_library_from(&dir);
-        assert_eq!(loaded_again.len(), 12);
+        assert_eq!(loaded_again.len(), 11);
 
         cleanup(&dir);
     }
@@ -181,7 +178,7 @@ mod tests {
     fn write_fixture_persists_and_round_trips() {
         let dir = scratch_dir("write");
         let mut set = CurveSet::new("Test Species (Testus testicus)");
-        set.colorspace_curves.push(crate::curve::SpectralCurve::new(
+        set.curves.push(crate::curve::SpectralCurve::new(
             "X-cone",
             crate::curve::CurveType::Sensitivity,
         ));
@@ -215,7 +212,7 @@ mod tests {
     #[test]
     fn restore_builtin_defaults_overwrites_edited_builtin_but_keeps_custom_fixtures() {
         let dir = scratch_dir("restore");
-        load_library_from(&dir); // bootstrap the 12 built-ins
+        load_library_from(&dir); // bootstrap the 11 built-ins
 
         // Simulate a user edit to a built-in fixture's on-disk file...
         let mut edited_human = crate::fixtures::human();
@@ -229,7 +226,7 @@ mod tests {
         write_fixture_in(&dir, &custom).unwrap();
 
         let restored = restore_builtin_defaults_in(&dir);
-        assert_eq!(restored.len(), 13, "12 restored built-ins + 1 custom");
+        assert_eq!(restored.len(), 12, "11 restored built-ins + 1 custom");
 
         let human_restored = restored
             .iter()

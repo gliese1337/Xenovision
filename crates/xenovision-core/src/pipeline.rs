@@ -2,10 +2,17 @@
 //! receptor activation, chromatic adaptation (via `adaptation`), and the
 //! luminance + opponent (chroma) construction, combined into a per-
 //! species+illuminant `Pipeline` that's cheap to evaluate per stimulus.
+//!
+//! A `Pipeline` now evaluates *one colorspace regime* (§2.2): build one
+//! per regime from its `RegimeConfig` (`CurveSet::regime_config`). A
+//! species with several regimes (e.g. the frog's scotopic/mesopic/
+//! photopic, §2.3.10) produces several pipelines; species with no
+//! regimes at all (§10.2's Mantis Shrimp) never build one, their
+//! receptors being reported individually instead.
 
 use crate::adaptation::{derive_adaptation_matrix, AdaptationResult};
-use crate::curve::SpectralCurve;
-use crate::curve_set::CurveSet;
+use crate::curve::{operating_gain, DEFAULT_ILLUMINATION_SOFTNESS, SpectralCurve};
+use crate::curve_set::RegimeConfig;
 use crate::linalg::{self, dot, norm};
 
 /// Raw receptor activation `Q = ∫ S(λ)·I(λ) dλ` (§2.2.2), via trapezoidal
@@ -48,16 +55,16 @@ pub fn integrate_product(a: &SpectralCurve, b: &SpectralCurve, step_nm: f64) -> 
 
 /// Raw (pre-adaptation) activations `Q_i = ∫ S_i(λ)·stimulus(λ) dλ`
 /// (§2.2.2 Step 1) for every curve in `curves` against `stimulus` - the
-/// same formula `Pipeline` already uses internally for its colorspace
-/// receptor curves before adaptation, exposed generically here so it
-/// applies identically to curves that never enter the opponent-process
-/// pipeline at all (§10.1: curves held in a `CurveSet`'s
-/// `isolated_curves`, e.g. the swallowtail butterfly's violet/broad-
-/// band receptors or - the all-isolated-curves case - a Mantis Shrimp
-/// fixture's entire receptor set, §10.2). There's no "adapted" version
-/// of this for isolated curves to show instead: adaptation is itself
-/// a property of the colorspace curves' chromatic-adaptation matrix,
-/// which an isolated curve was never part of deriving.
+/// same formula `Pipeline` already uses internally for its regime member
+/// curves before adaptation, exposed generically here so it applies
+/// identically to curves that never enter the opponent-process pipeline
+/// at all (§10.1, §10.2: receptors not in any colorspace regime, e.g.
+/// the swallowtail butterfly's violet/broad-band receptors or - the
+/// no-regime-at-all case - a Mantis Shrimp fixture's entire receptor
+/// set). There's no "adapted" version of this for unaffiliated curves to
+/// show instead: adaptation is itself a property of a regime's
+/// chromatic-adaptation matrix, which such a curve was never part of
+/// deriving.
 pub fn raw_activations(
     curves: &[SpectralCurve],
     stimulus: &SpectralCurve,
@@ -87,6 +94,24 @@ pub fn raw_activations_with_gains(
             let g = gains.get(i).copied().unwrap_or(1.0);
             c.saturate(g * integrate_product(c, stimulus, step_nm))
         })
+        .collect()
+}
+
+/// Per-receptor seen irradiances (W/m²) for every curve in `curves`
+/// under `illuminant`: `E_i = ∫ S_i(λ)·I(λ) dλ` (§2.2) - the
+/// receptor-filtered ambient light each receptor actually absorbs. The
+/// pool-wide counterpart of `Pipeline::seen_irradiances`, used to report
+/// receptors that belong to no colorspace regime (§10.1/§10.2) with
+/// their own operating state even though they never enter an opponent
+/// pipeline. The caller owns gating (`CurveSet::receptor_gains`).
+pub fn seen_irradiances_for(
+    curves: &[SpectralCurve],
+    illuminant: &SpectralCurve,
+    step_nm: f64,
+) -> Vec<f64> {
+    curves
+        .iter()
+        .map(|c| integrate_product(c, illuminant, step_nm))
         .collect()
 }
 
@@ -183,27 +208,23 @@ impl Coordinates {
     }
 }
 
-/// A fully-built per-species, per-reference-illuminant pipeline (§2.2's
-/// combined transform): the expensive part (deriving the adaptation
-/// matrix, §2.2.3) is done once in `build`, so `coordinates` is cheap to
-/// call per stimulus.
+/// A fully-built per-regime, per-reference-illuminant pipeline (§2.2's
+/// combined transform restricted to one colorspace regime): the expensive
+/// part (deriving the adaptation matrix, §2.2.3) is done once in `build`,
+/// so `coordinates` is cheap to call per stimulus. Build one per regime
+/// of the species; regime ordering across pipelines is the species'
+/// `regimes` list order.
 pub struct Pipeline {
-    colorspace_curves: Vec<SpectralCurve>,
-    /// Carried alongside `colorspace_curves` so individual photoreceptor
-    /// activations (§10.1) can be displayed for curves that don't
-    /// participate in the opponent-process pipeline at all (e.g. the
-    /// swallowtail butterfly's violet/broad-band receptors, §2.3.9) -
-    /// consistent with "the data model carries everything the pipeline
-    /// needs" rather than requiring a caller to separately hold onto the
-    /// originating `CurveSet` just for this.
-    isolated_curves: Vec<SpectralCurve>,
+    /// The regime this pipeline evaluates, from its config's name.
+    name: String,
+    /// This regime's member curves, in member order.
+    curves: Vec<SpectralCurve>,
     adaptation: AdaptationResult,
     q_env: Vec<f64>,
     luminance_weights: Vec<f64>,
     chroma_axes: Vec<Vec<f64>>,
-    /// Vorobyev-Osorio per-receptor noise terms (§3.3.2), if `species`
-    /// had complete omega+eta data on every curve - see
-    /// `CurveSet::receptor_noise`.
+    /// Vorobyev-Osorio per-member noise terms (§3.3.2), if every member
+    /// had complete omega+eta data - see `RegimeConfig.noise`.
     noise: Option<Vec<f64>>,
     step_nm: f64,
     /// Total irradiance (W/m²) of the reference illuminant
@@ -212,59 +233,74 @@ pub struct Pipeline {
     /// shows it); gating itself uses the per-receptor seen irradiances
     /// below, because receptors only "see" the light they absorb.
     reference_irradiance_w_m2: f64,
-    /// Irradiance (W/m²) each colorspace receptor actually sees under the
+    /// Irradiance (W/m²) each regime member actually sees under the
     /// reference illuminant: `E_i = ∫ S_i(λ)·I(λ) dλ` (§2.2) - the
     /// receptor-filtered ambient light that drives `response_gains`.
-    colorspace_seen_irradiances: Vec<f64>,
-    /// Operating gain `g_i` for each colorspace curve, in order
-    /// (§2.2, receptor operating window), from that curve's own seen
+    seen_irradiances: Vec<f64>,
+    /// Operating gain `g_i` for each member curve, in order (§2.2,
+    /// receptor operating window), from that curve's own seen
     /// irradiance. Applied to raw activations before adaptation so the
     /// adapting white point is consistent.
     response_gains: Vec<f64>,
-    /// Operating gain for each isolated curve, in order - reported
-    /// activations (§10.1) honor a curve's own window even though it
-    /// never enters the opponent pipeline.
-    isolated_gains: Vec<f64>,
+    /// The regime's overall activity: the product of its members' gains
+    /// (`∏ g_i`, §2.2). ~1 only where *every* member's window contains
+    /// its seen irradiance - so a dim-only regime is ~0 in bright light,
+    /// and a mesopic regime (rods *and* cones both on, §2.3.10) peaks
+    /// only in the band where both receptor classes operate.
+    regime_gain: f64,
 }
 
 impl Pipeline {
-    /// Builds the pipeline from a species' `CurveSet` directly: luminance
-    /// weights, opponent-contrast candidate rows, and ΔS noise terms all
-    /// come from the set's own data (§4's representability goal - the
-    /// data model carries everything the pipeline needs, with no
-    /// separately-maintained parameter vectors that could drift out of
-    /// sync with it).
-    pub fn build(species: CurveSet, reference_illuminant: &SpectralCurve, step_nm: f64) -> Self {
-        let luminance_weights = species.luminance_weights(step_nm);
-        let candidate_rows = species.candidate_rows();
-        let noise = species.receptor_noise();
-        // Each receptor's operating gain (§2.2) is driven by the
-        // irradiance that receptor actually absorbs from the reference
-        // illuminant - not the unfiltered total - because a receptor
-        // "sees" only the light its own sensitivity passes: E_i =
-        // ∫ S_i(λ)·I(λ)dλ in W/m² (luminants are spectral irradiance in
-        // W/m²/nm, sensitivities are dimensionless weights). Computed
-        // before moving the curves out of `species`.
+    /// Builds the pipeline for one colorspace regime from the config the
+    /// `CurveSet` resolved for it (`CurveSet::regime_config`): luminance
+    /// weights, opponent-contrast candidate rows, per-member windows, and
+    /// ΔS noise terms all come from the set's own data (§4's
+    /// representability goal - the data model carries everything the
+    /// pipeline needs, with no separately-maintained parameter vectors
+    /// that could drift out of sync with it).
+    pub fn build(config: RegimeConfig, reference_illuminant: &SpectralCurve, step_nm: f64) -> Self {
+        let RegimeConfig {
+            name,
+            luminance_weights,
+            candidate_rows,
+            noise,
+            curves,
+            illumination_min,
+            illumination_max,
+            illumination_softness,
+        } = config;
+
+        // Each member's operating gain (§2.2) is driven by the irradiance
+        // that receptor actually absorbs from the reference illuminant -
+        // not the unfiltered total - because a receptor "sees" only the
+        // light its own sensitivity passes: E_i = ∫ S_i(λ)·I(λ)dλ in
+        // W/m² (luminants are spectral irradiance in W/m²/nm,
+        // sensitivities are dimensionless weights).
         let reference_irradiance_w_m2 =
             crate::illumination::irradiance_w_m2(reference_illuminant, step_nm);
-        let colorspace_seen_irradiances: Vec<f64> = species
-            .colorspace_curves
+        let seen_irradiances: Vec<f64> = curves
             .iter()
             .map(|c| integrate_product(c, reference_illuminant, step_nm))
             .collect();
-        let response_gains = species.colorspace_gating_gains(&colorspace_seen_irradiances);
-        let isolated_seen_irradiances: Vec<f64> = species
-            .isolated_curves
+        let response_gains: Vec<f64> = curves
             .iter()
-            .map(|c| integrate_product(c, reference_illuminant, step_nm))
+            .zip(seen_irradiances.iter())
+            .map(|(c, &seen)| {
+                operating_gain(
+                    seen,
+                    c.illumination_min.or(illumination_min),
+                    c.illumination_max.or(illumination_max),
+                    c.illumination_softness
+                        .or(illumination_softness)
+                        .unwrap_or(DEFAULT_ILLUMINATION_SOFTNESS),
+                )
+            })
             .collect();
-        let isolated_gains = species.isolated_gating_gains(&isolated_seen_irradiances);
-        let colorspace_curves = species.colorspace_curves;
-        let isolated_curves = species.isolated_curves;
+        let regime_gain = response_gains.iter().product();
 
-        let adaptation = derive_adaptation_matrix(&colorspace_curves, step_nm);
+        let adaptation = derive_adaptation_matrix(&curves, step_nm);
         let q_env: Vec<f64> = raw_activations_with_gains(
-            &colorspace_curves,
+            &curves,
             &response_gains,
             reference_illuminant,
             step_nm,
@@ -272,8 +308,8 @@ impl Pipeline {
         let chroma_axes = build_chroma_axes(&candidate_rows, &luminance_weights, 1e-9);
 
         Pipeline {
-            colorspace_curves,
-            isolated_curves,
+            name,
+            curves,
             adaptation,
             q_env,
             luminance_weights,
@@ -281,10 +317,15 @@ impl Pipeline {
             noise,
             step_nm,
             reference_irradiance_w_m2,
-            colorspace_seen_irradiances,
+            seen_irradiances,
             response_gains,
-            isolated_gains,
+            regime_gain,
         }
+    }
+
+    /// The regime this pipeline evaluates (`RegimeConfig.name`).
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// The total irradiance (W/m²) of the reference illuminant this
@@ -294,26 +335,37 @@ impl Pipeline {
         self.reference_irradiance_w_m2
     }
 
-    /// The irradiance (W/m²) each colorspace receptor actually absorbs
-    /// from the reference illuminant, in the same order as
-    /// `response_gains`/`colorspace_activations` (§2.2) - the
-    /// receptor-filtered ambient light that set its operating gain.
-    pub fn colorspace_seen_irradiances(&self) -> &[f64] {
-        &self.colorspace_seen_irradiances
+    /// The irradiance (W/m²) each regime member actually absorbs from the
+    /// reference illuminant, in the same order as `response_gains`/
+    /// `activations` (§2.2) - the receptor-filtered ambient light that
+    /// set its operating gain.
+    pub fn seen_irradiances(&self) -> &[f64] {
+        &self.seen_irradiances
     }
 
-    /// Operating gain of each colorspace receptor, in the same order as
-    /// `colorspace_curve_names`/`colorspace_activations` (§2.2).
+    /// Operating gain of each regime member, in the same order as
+    /// `curve_names`/`activations` (§2.2).
     pub fn response_gains(&self) -> &[f64] {
         &self.response_gains
     }
 
-    /// `true` if at least one colorspace receptor is substantially operating
+    /// The regime's overall activity, `∏ g_i` over its members' gains
+    /// (§2.2): ~1 only where every member's own window contains its seen
+    /// irradiance. Used to compare regimes side-by-side and mark the
+    /// dominant one at a given light level. A degenerate regime with no
+    /// members has gain 1.0 but `is_active() == false` (nothing
+    /// operating).
+    pub fn regime_gain(&self) -> f64 {
+        self.regime_gain
+    }
+
+    /// `true` if at least one regime member is substantially operating
     /// (gain above 0.1) under this pipeline's reference illuminant. A
-    /// species with no operating receptors produces all-zero coordinates;
+    /// regime with no operating receptors produces all-zero coordinates;
     /// callers use this to flag that state rather than present it as a
     /// real result. The 0.1 threshold means a receptor merely sitting on
-    /// the shoulder of its window (gain < 10%) does not count as operating.
+    /// the shoulder of its window (gain < 10%) does not count as
+    /// operating.
     pub fn is_active(&self) -> bool {
         self.response_gains.iter().any(|g| *g > 0.1)
     }
@@ -350,51 +402,22 @@ impl Pipeline {
     /// same quantity `coordinates` derives luminance/chroma from, exposed
     /// directly for the ΔS metric (§3.3.2).
     pub fn adapted_activations(&self, stimulus: &SpectralCurve) -> Vec<f64> {
-        self.adapt(&self.colorspace_activations(stimulus))
+        self.adapt(&self.activations(stimulus))
     }
 
-    /// Raw (pre-adaptation) activations for the colorspace receptor
-    /// curves (§10.1) - the same `Q` `adapted_activations` adapts,
-    /// exposed on its own so a UI can display both the raw and adapted
-    /// value per receptor rather than only the adapted one. Includes each
-    /// receptor's operating gain (§2.2).
-    pub fn colorspace_activations(&self, stimulus: &SpectralCurve) -> Vec<f64> {
-        raw_activations_with_gains(
-            &self.colorspace_curves,
-            &self.response_gains,
-            stimulus,
-            self.step_nm,
-        )
+    /// Raw (pre-adaptation) activations for this regime's member curves
+    /// (§10.1) - the same `Q` `adapted_activations` adapts, exposed on
+    /// its own so a UI can display both the raw and adapted value per
+    /// receptor rather than only the adapted one. Includes each member's
+    /// operating gain (§2.2).
+    pub fn activations(&self, stimulus: &SpectralCurve) -> Vec<f64> {
+        raw_activations_with_gains(&self.curves, &self.response_gains, stimulus, self.step_nm)
     }
 
-    /// Raw activations for the isolated curves (§10.1, §10.2) - never
-    /// adapted, since adaptation is a property of the colorspace
-    /// curves' own chromatic-adaptation matrix, which these curves were
-    /// never part of deriving. Each isolated curve's own operating window
-    /// still applies.
-    pub fn isolated_activations(&self, stimulus: &SpectralCurve) -> Vec<f64> {
-        raw_activations_with_gains(
-            &self.isolated_curves,
-            &self.isolated_gains,
-            stimulus,
-            self.step_nm,
-        )
-    }
-
-    /// Display names for the colorspace receptor curves, in the same
-    /// order `colorspace_activations`/`adapted_activations`/
-    /// `coordinates` use.
-    pub fn colorspace_curve_names(&self) -> Vec<&str> {
-        self.colorspace_curves
-            .iter()
-            .map(|c| c.name.as_str())
-            .collect()
-    }
-
-    /// Display names for the isolated curves, in the same order
-    /// `isolated_activations` uses.
-    pub fn isolated_curve_names(&self) -> Vec<&str> {
-        self.isolated_curves
+    /// Display names for this regime's member curves, in the same order
+    /// `activations`/`adapted_activations`/`coordinates` use.
+    pub fn curve_names(&self) -> Vec<&str> {
+        self.curves
             .iter()
             .map(|c| c.name.as_str())
             .collect()
@@ -424,11 +447,21 @@ impl Pipeline {
 mod tests {
     use super::*;
     use crate::curve::CurveType;
+    use crate::curve_set::CurveSet;
     use crate::fixtures;
 
     fn flat_curve(name: &str, value: f64) -> SpectralCurve {
         SpectralCurve::new(name, CurveType::Illumination)
             .with_points(vec![(300.0, value), (750.0, value)])
+    }
+
+    /// A single-regime species' pipeline: the common test shape.
+    fn build_default(set: CurveSet, illuminant: &SpectralCurve) -> Pipeline {
+        Pipeline::build(set.default_regime_config(), illuminant, 1.0)
+    }
+
+    fn build_regime(set: &CurveSet, idx: usize, illuminant: &SpectralCurve) -> Pipeline {
+        Pipeline::build(set.regime_config(&set.regimes[idx]), illuminant, 1.0)
     }
 
     // --- integrate_product: hand-calculable cases ---
@@ -473,7 +506,11 @@ mod tests {
             let candidates = generic_candidate_rows(n);
             let luminance = vec![1.0 / n as f64; n];
             let chroma = build_chroma_axes(&candidates, &luminance, 1e-9);
-            assert_eq!(chroma.len(), n - 1, "n={n}");
+            assert_eq!(
+                chroma.len(),
+                n - 1,
+                "n={n} generic candidates must reduce to n-1 axes"
+            );
             // Every chroma axis must be orthogonal to luminance.
             for axis in &chroma {
                 assert!(dot(axis, &luminance).abs() < 1e-9, "n={n} axis={axis:?}");
@@ -493,8 +530,9 @@ mod tests {
     #[test]
     fn human_literature_contrasts_orthogonalize_to_exactly_2_chroma_axes() {
         let human = fixtures::human();
-        let luminance = human.luminance_weights(1.0);
-        let candidates = human.candidate_rows();
+        let config = human.regime_config(&human.regimes[0]);
+        let luminance = config.luminance_weights;
+        let candidates = config.candidate_rows;
         let chroma = build_chroma_axes(&candidates, &luminance, 1e-9);
         assert_eq!(
             chroma.len(),
@@ -518,14 +556,14 @@ mod tests {
     #[test]
     fn human_pipeline_has_exactly_2_chroma_channels() {
         let illuminant = flat_curve("flat", 1.0);
-        let pipeline = Pipeline::build(fixtures::human(), &illuminant, 1.0);
+        let pipeline = build_default(fixtures::human(), &illuminant);
         assert_eq!(pipeline.chroma_axis_count(), 2);
     }
 
     #[test]
     fn human_pipeline_coordinates_are_finite_and_saturation_matches_chroma() {
         let illuminant = flat_curve("flat", 1.0);
-        let pipeline = Pipeline::build(fixtures::human(), &illuminant, 1.0);
+        let pipeline = build_default(fixtures::human(), &illuminant);
         // A reddish stimulus: flat background with a bump near 600nm.
         let stimulus = SpectralCurve::new("reddish", CurveType::Reflectance).with_points(vec![
             (300.0, 0.2),
@@ -547,7 +585,7 @@ mod tests {
         // N=3 -> 2 chroma dims -> exactly 1 hue angle, the plain 2D
         // polar angle of the chroma vector.
         let illuminant = flat_curve("flat", 1.0);
-        let pipeline = Pipeline::build(fixtures::human(), &illuminant, 1.0);
+        let pipeline = build_default(fixtures::human(), &illuminant);
         let stimulus = SpectralCurve::new("reddish", CurveType::Reflectance).with_points(vec![
             (300.0, 0.2),
             (600.0, 0.9),
@@ -566,19 +604,19 @@ mod tests {
         let stimulus = SpectralCurve::new("test", CurveType::Reflectance)
             .with_points(vec![(400.0, 0.5), (700.0, 0.5)]);
 
-        let mono = Pipeline::build(
+        let mono = build_default(
             {
                 let mut set = CurveSet::new("Monochromat");
-                set.colorspace_curves = vec![SpectralCurve::new("R", CurveType::Sensitivity)
+                set.curves = vec![SpectralCurve::new("R", CurveType::Sensitivity)
                     .with_points(vec![(400.0, 1.0), (700.0, 1.0)])];
+                set.regimes = vec![crate::curve_set::Regime::new("Mono", vec![0])];
                 set
             },
             &illuminant,
-            1.0,
         );
         assert_eq!(mono.coordinates(&stimulus).hue_angles().len(), 0);
 
-        let di = Pipeline::build(fixtures::dog(), &illuminant, 1.0);
+        let di = build_default(fixtures::dog(), &illuminant);
         assert_eq!(di.coordinates(&stimulus).chroma.len(), 1);
         assert_eq!(di.coordinates(&stimulus).hue_angles().len(), 0);
     }
@@ -586,7 +624,7 @@ mod tests {
     #[test]
     fn human_pipeline_exposes_noise_from_fixture_data() {
         let illuminant = flat_curve("flat", 1.0);
-        let pipeline = Pipeline::build(fixtures::human(), &illuminant, 1.0);
+        let pipeline = build_default(fixtures::human(), &illuminant);
         let noise = pipeline
             .noise()
             .expect("human fixture has complete omega/eta");
@@ -615,11 +653,11 @@ mod tests {
     #[test]
     fn saturated_pipeline_still_produces_finite_coordinates() {
         let mut set = fixtures::human();
-        for c in set.colorspace_curves.iter_mut() {
+        for c in set.curves.iter_mut() {
             c.saturation = Some(1.0);
         }
         let bright = flat_curve("bright", 1000.0);
-        let pipeline = Pipeline::build(set, &bright, 1.0);
+        let pipeline = build_default(set, &bright);
         let stimulus = flat_curve("stim", 1000.0);
         let coords = pipeline.coordinates(&stimulus);
         assert!(coords.luminance.is_finite());
@@ -627,7 +665,7 @@ mod tests {
         // Every receptor is pinned at its cap, so the raw activations are
         // all exactly 1.0.
         assert!(pipeline
-            .colorspace_activations(&stimulus)
+            .activations(&stimulus)
             .iter()
             .all(|&q| q == 1.0));
     }
@@ -646,54 +684,79 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_colorspace_activations_differ_from_adapted_but_use_same_names() {
+    fn pipeline_activations_differ_from_adapted_but_use_same_names() {
         let illuminant = flat_curve("flat", 1.0);
-        let pipeline = Pipeline::build(fixtures::human(), &illuminant, 1.0);
+        let pipeline = build_default(fixtures::human(), &illuminant);
         let stimulus = SpectralCurve::new("reddish", CurveType::Reflectance).with_points(vec![
             (300.0, 0.2),
             (500.0, 0.2),
             (600.0, 0.9),
             (700.0, 0.9),
         ]);
-        let raw = pipeline.colorspace_activations(&stimulus);
+        let raw = pipeline.activations(&stimulus);
         let adapted = pipeline.adapted_activations(&stimulus);
         assert_eq!(raw.len(), 3);
         assert_eq!(adapted.len(), 3);
         assert_ne!(raw, adapted, "adaptation should actually change the values");
         assert_eq!(
-            pipeline.colorspace_curve_names(),
+            pipeline.curve_names(),
             vec!["S-cone", "M-cone", "L-cone"]
         );
     }
 
     #[test]
-    fn pipeline_isolated_activations_computed_for_non_participating_curves() {
-        // Butterfly has 4 colorspace + 2 isolated curves (violet, broad-band).
+    fn unaffiliated_receptors_report_their_own_operating_state() {
+        // Butterfly has 4 regimes-member receptors + 2 unaffiliated
+        // (violet, broad-band). The unaffiliated ones never enter an
+        // opponent pipeline, but pool-wide reporting still gives them
+        // their own seen irradiances and gains.
+        let set = fixtures::butterfly();
         let illuminant = flat_curve("flat", 1.0);
-        let pipeline = Pipeline::build(fixtures::butterfly(), &illuminant, 1.0);
-        let stimulus = SpectralCurve::new("test", CurveType::Reflectance)
-            .with_points(vec![(300.0, 0.5), (750.0, 0.5)]);
+        let seen = seen_irradiances_for(&set.curves, &illuminant, 1.0);
+        assert_eq!(seen.len(), 6, "the whole pool reports, not just members");
+        let gains = set.receptor_gains(&seen);
+        assert_eq!(gains.len(), 6);
 
-        assert_eq!(pipeline.isolated_curve_names().len(), 2);
-        let isolated = pipeline.isolated_activations(&stimulus);
-        assert_eq!(isolated.len(), 2);
-        assert!(isolated.iter().all(|v| v.is_finite()));
+        // Violet + broad-band carry no windows -> always on (gain ~1).
+        assert_eq!(set.curves[4].name, "Violet (non-color-vision)");
+        assert!(
+            (gains[4] - 1.0).abs() < 1e-12 && (gains[5] - 1.0).abs() < 1e-12,
+            "unaffiliated receptors are ungated: {gains:?}"
+        );
 
-        // A direct call against the same curves must match exactly -
-        // confirming isolated_activations isn't silently reusing the
-        // colorspace curves' adaptation machinery.
+        // Its seen irradiance is the plain integral against the reference
+        // illuminant, matching a direct call - no adaptation machinery
+        // involved for a receptor outside any regime.
         let violet = SpectralCurve::new("Violet (non-color-vision)", CurveType::Sensitivity)
             .with_points(crate::govardovskii::generate_points(
                 400.0, 300.0, 750.0, 5.0,
             ));
-        let direct = integrate_product(&violet, &stimulus, 1.0);
-        assert!((isolated[0] - direct).abs() < 1e-6);
+        let direct_seen = integrate_product(&violet, &illuminant, 1.0);
+        assert!(
+            (seen[4] - direct_seen).abs() < 1e-6,
+            "seen {} vs direct {direct_seen}",
+            seen[4]
+        );
+
+        // And its raw activation under a stimulus is equally plain.
+        let stimulus = SpectralCurve::new("test", CurveType::Reflectance)
+            .with_points(vec![(300.0, 0.5), (750.0, 0.5)]);
+        let raw = crate::pipeline::raw_activations(
+            std::slice::from_ref(&set.curves[4]),
+            &stimulus,
+            1.0,
+        )[0];
+        let direct_raw = integrate_product(&violet, &stimulus, 1.0);
+        assert!(
+            (raw - direct_raw).abs() < 1e-6,
+            "activation {raw} vs direct {direct_raw}"
+        );
     }
 
     #[test]
     fn coordinates_adapted_activations_matches_direct_call() {
         let illuminant = flat_curve("flat", 1.0);
-        let pipeline = Pipeline::build(fixtures::human(), &illuminant, 1.0);
+        let pipeline = build_default(fixtures::human(), &illuminant);
         let stimulus = SpectralCurve::new("test", CurveType::Reflectance)
             .with_points(vec![(400.0, 0.5), (700.0, 0.5)]);
         let coords = pipeline.coordinates(&stimulus);
@@ -709,7 +772,7 @@ mod tests {
     #[test]
     fn high_n_custom_system_still_produces_correct_chroma_count() {
         let n = 8;
-        let colorspace_curves: Vec<SpectralCurve> = (0..n)
+        let curves: Vec<SpectralCurve> = (0..n)
             .map(|i| {
                 let lmax = 350.0 + i as f64 * (300.0 / (n as f64 - 1.0));
                 SpectralCurve::new(format!("R{i}"), CurveType::Sensitivity).with_points(
@@ -718,10 +781,14 @@ mod tests {
             })
             .collect();
         let mut set = CurveSet::new("High-N custom test system");
-        set.colorspace_curves = colorspace_curves;
+        set.curves = curves;
+        set.regimes = vec![crate::curve_set::Regime::new(
+            "High-N",
+            (0..n as u64).collect(),
+        )];
 
         let illuminant = flat_curve("flat", 1.0);
-        let pipeline = Pipeline::build(set, &illuminant, 1.0);
+        let pipeline = build_default(set, &illuminant);
         assert_eq!(pipeline.chroma_axis_count(), n - 1);
 
         let stimulus = SpectralCurve::new("test", CurveType::Reflectance)
@@ -732,8 +799,8 @@ mod tests {
         assert!(coords.chroma.iter().all(|c| c.is_finite()));
     }
 
-    /// §2.2's regime example at the pipeline level: two receptors with
-    /// disjoint operating windows (e.g. a dim-light rod and a
+    /// §2.2's regime-gating example at the pipeline level: two receptors
+    /// with disjoint operating windows (e.g. a dim-light rod and a
     /// bright-light cone) - only the receptor whose *own window contains
     /// the irradiance it actually sees* under the current light
     /// contributes. Each receptor sees `E_i = ∫ S_i(λ)·I(λ)dλ` (W/m²
@@ -743,9 +810,11 @@ mod tests {
     #[test]
     fn disjoint_operating_windows_switch_regime_with_light_level() {
         // Receptor A operates at dim seen irradiances [1e-3, 1e-1]; B at
-        // bright [10, 1e3] (W/m²). Never overlap.
+        // bright [10, 1e3] (W/m²). Never overlap. Modeled as two
+        // single-member regimes: the species is in the dim regime in dim
+        // light and the bright regime in bright light.
         let mut set = CurveSet::new("Regime pair");
-        set.colorspace_curves = vec![
+        set.curves = vec![
             SpectralCurve::new("Dim", CurveType::Sensitivity)
                 .with_points(vec![(400.0, 1.0), (500.0, 0.4)])
                 .with_illumination_window(Some(1e-3), Some(1e-1))
@@ -754,6 +823,10 @@ mod tests {
                 .with_points(vec![(400.0, 0.4), (500.0, 1.0)])
                 .with_illumination_window(Some(1e1), Some(1e3))
                 .with_illumination_softness(0.25),
+        ];
+        set.regimes = vec![
+            crate::curve_set::Regime::new("Dim regime", vec![0]),
+            crate::curve_set::Regime::new("Bright regime", vec![1]),
         ];
 
         let gain_at = |power: f64| {
@@ -764,36 +837,138 @@ mod tests {
                 }
                 e
             };
-            let pipeline = Pipeline::build(set.clone(), &illuminant, 1.0);
+            let dim = build_regime(&set, 0, &illuminant);
+            let bright = build_regime(&set, 1, &illuminant);
             (
-                pipeline.colorspace_seen_irradiances().to_vec(),
-                pipeline.response_gains().to_vec(),
+                dim.seen_irradiances()[0],
+                dim.response_gains()[0],
+                bright.response_gains()[0],
+                dim.regime_gain(),
+                bright.regime_gain(),
             )
         };
 
         // power 1e-4 -> E ≈ 7e-3 W/m² (70·power plus a tiny edge bias
         // from the sensitivity curve's hard domain cutoffs), mid-A-window.
-        let (seen, dim_gains) = gain_at(1e-4);
+        let (seen, dim_gain, bright_gain, dim_regime_gain, bright_regime_gain) = gain_at(1e-4);
         assert!(
-            (seen[0] / 7e-3 - 1.0).abs() < 0.02,
-            "E_A ≈ 70·power, got {}",
-            seen[0]
+            (seen / 7e-3 - 1.0).abs() < 0.02,
+            "E_A ≈ 70·power, got {seen}"
         );
         assert!(
-            dim_gains[0] > 0.99 && dim_gains[1] < 1e-3,
-            "dim light should activate A only, got {dim_gains:?}"
+            dim_gain > 0.99 && bright_gain < 1e-3,
+            "dim light should activate A only, got dim={dim_gain} bright={bright_gain}"
+        );
+        assert!(
+            dim_regime_gain > 0.99 && bright_regime_gain < 1e-3,
+            "the dim regime dominates in dim light: {dim_regime_gain} vs {bright_regime_gain}"
         );
         // power 1.0 -> E = 70 W/m², mid-B-window.
-        let (_, bright_gains) = gain_at(1.0);
+        let (_, dim_gain, bright_gain, dim_regime_gain, bright_regime_gain) = gain_at(1.0);
         assert!(
-            bright_gains[0] < 1e-3 && bright_gains[1] > 0.99,
-            "bright light should activate B only, got {bright_gains:?}"
+            dim_gain < 1e-3 && bright_gain > 0.99,
+            "bright light should activate B only, got dim={dim_gain} bright={bright_gain}"
+        );
+        assert!(
+            bright_regime_gain > 0.99 && dim_regime_gain < 1e-3,
+            "the bright regime dominates in bright light: {bright_regime_gain} vs {dim_regime_gain}"
         );
         // power 0.02 -> E = 1.4 W/m², in the gap between the windows.
-        let (_, mid_gains) = gain_at(0.02);
+        let (_, dim_gain, bright_gain, dim_regime_gain, bright_regime_gain) = gain_at(0.02);
         assert!(
-            mid_gains[0] < 1e-3 && mid_gains[1] < 1e-3,
-            "in the gap both receptors should be silent, got {mid_gains:?}"
+            dim_gain < 1e-3 && bright_gain < 1e-3,
+            "in the gap both receptors should be silent, got dim={dim_gain} bright={bright_gain}"
+        );
+        assert!(
+            dim_regime_gain < 1e-3 && bright_regime_gain < 1e-3,
+            "no regime is active in the gap: {dim_regime_gain} vs {bright_regime_gain}"
+        );
+    }
+
+    /// §2.2's `regime_gain = ∏ g_i` over member gains: a two-member
+    /// regime is ~1 only mid-window for *both* members, and the stored
+    /// regime gain is exactly the product of the member response gains.
+    #[test]
+    fn regime_gain_is_the_product_of_member_gains() {
+        let mut set = CurveSet::new("Two-member regime");
+        set.curves = vec![
+            SpectralCurve::new("A", CurveType::Sensitivity)
+                .with_points(vec![(400.0, 1.0), (500.0, 0.4)])
+                .with_illumination_window(Some(1e-3), Some(1e-1))
+                .with_illumination_softness(0.5),
+            SpectralCurve::new("B", CurveType::Sensitivity)
+                .with_points(vec![(400.0, 0.4), (500.0, 1.0)])
+                .with_illumination_window(Some(1e-3), Some(1e-1))
+                .with_illumination_softness(0.5),
+        ];
+        set.regimes = vec![crate::curve_set::Regime::new("Pair", vec![0, 1])];
+        // Each probe curve spans 70 nm·w, so at power 1.5e-4 both see
+        // E ≈ 70·1.5e-4 ≈ 1e-2 W/m² - the geometric mid-point of
+        // [1e-3, 1e-1], an equal margin off either shoulder.
+        let illuminant = {
+            let mut e = flat_curve("e", 1.5e-4);
+            for pt in e.points.iter_mut() {
+                pt.1 = 1.5e-4;
+            }
+            e
+        };
+        let pipeline = build_default(set, &illuminant);
+        let product: f64 = pipeline.response_gains().iter().product();
+        assert!(
+            (pipeline.regime_gain() - product).abs() < 1e-9,
+            "regime_gain must be exactly ∏ g_i"
+        );
+        assert!(
+            product > 0.9,
+            "both members mid-window -> regime nearly fully on: {product}"
+        );
+
+        // A pair whose members' windows don't overlap (dim member
+        // [1e-3, 1e-1], interloper [1e1, 1e3]): at E ≈ 1e-2 W/m² the dim
+        // member is mid-window and the interloper is far below its 1e1
+        // min. The regime's product is ~0 even though *a* member is
+        // operating - the regime's activity is the joint condition, not
+        // the strongest member (this is exactly why the mesopic regime
+        // collapses outside its band, §2.3.10).
+        let mut pair = CurveSet::new("Pair");
+        pair.curves = vec![
+            SpectralCurve::new("Dim member", CurveType::Sensitivity)
+                .with_points(vec![(400.0, 1.0), (500.0, 0.4)])
+                .with_illumination_window(Some(1e-3), Some(1e-1))
+                .with_illumination_softness(0.5),
+            SpectralCurve::new("Interloper", CurveType::Sensitivity)
+                .with_points(vec![(400.0, 0.4), (500.0, 1.0)])
+                .with_illumination_window(Some(1e1), Some(1e3))
+                .with_illumination_softness(0.5),
+        ];
+        pair.regimes = vec![crate::curve_set::Regime::new("Combined", vec![0, 1])];
+        let mid = {
+            let mut e = flat_curve("mid", 1.5e-4);
+            for pt in e.points.iter_mut() {
+                pt.1 = 1.5e-4;
+            }
+            e
+        };
+        let combined = build_default(pair.clone(), &mid);
+        assert!(
+            combined.is_active() && combined.regime_gain() < 1e-3,
+            "a member is on but the joint product is ~0: gain={}",
+            combined.regime_gain()
+        );
+
+        // The same dim member alone, as its own single-member regime at
+        // the same light: ~0.98. One pipeline cannot tell this apart
+        // from a regime that's genuinely all-on - only the per-regime
+        // product can.
+        let mut dim_only = CurveSet::new("Dim only");
+        dim_only.curves =
+            vec![pair.curves[0].clone()];
+        dim_only.regimes = vec![crate::curve_set::Regime::new("Dim", vec![0])];
+        let single = build_default(dim_only, &mid);
+        assert!(
+            single.regime_gain() > 0.9 && single.is_active(),
+            "single-member regime is nearly fully on: {}",
+            single.regime_gain()
         );
     }
 
@@ -804,7 +979,7 @@ mod tests {
         // receptor gated off. Must be finite ~zeros, not NaN, and the
         // pipeline must report itself inactive.
         let mut set = CurveSet::new("Only-dim");
-        set.colorspace_curves = vec![
+        set.curves = vec![
             SpectralCurve::new("A", CurveType::Sensitivity)
                 .with_points(vec![(400.0, 1.0), (500.0, 0.4)])
                 .with_illumination_window(Some(1e-3), Some(1e-1)),
@@ -812,8 +987,9 @@ mod tests {
                 .with_points(vec![(400.0, 0.4), (500.0, 1.0)])
                 .with_illumination_window(Some(1e-3), Some(1e-1)),
         ];
+        set.regimes = vec![crate::curve_set::Regime::new("Dim", vec![0, 1])];
         let bright = flat_curve("bright", 10.0);
-        let pipeline = Pipeline::build(set, &bright, 1.0);
+        let pipeline = build_default(set, &bright);
         assert!(!pipeline.is_active());
         let stimulus = flat_curve("test", 1.0);
         let coords = pipeline.coordinates(&stimulus);
@@ -821,7 +997,7 @@ mod tests {
         assert!(coords.chroma.iter().all(|c| c.is_finite()));
         assert!(
             pipeline
-                .colorspace_activations(&stimulus)
+                .activations(&stimulus)
                 .iter()
                 .all(|q| q.abs() < 1e-3),
             "gated-off receptors must yield ~zero raw activations"

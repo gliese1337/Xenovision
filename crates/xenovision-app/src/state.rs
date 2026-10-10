@@ -21,13 +21,21 @@
 //!   identical ("state persists while hidden") with less null-handling.
 //! - `DistanceMetric` is reused directly from `xenovision_core::comparison`
 //!   rather than redefined.
+//!
+//! Model shape (multi-regime §2.2): an `AppCurveSet` holds one receptor
+//! pool (`curves` + `curve_order`) and a list of `AppRegime`, each a
+//! colorspace over some pool indices (its own luminance/opponent
+//! overrides). There is no "colorspace vs. isolated" split: a receptor
+//! is either a member of at least one regime (in a colorspace) or of none
+//! (reported individually, formerly "isolated"). `to_core`/`from_core`
+//! reconcile stable `CurveId`s against the core's pool indices.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use xenovision_core::comparison::DistanceMetric;
-use xenovision_core::curve_set::OpponentContrast;
+use xenovision_core::curve_set::{OpponentContrast, Regime as CoreRegime};
 use xenovision_core::pipeline::Pipeline;
 use xenovision_core::{
     fixture_library, fixtures, CurveSet as CoreCurveSet, CurveType, QuantityKind, SpectralCurve,
@@ -41,23 +49,15 @@ use crate::window_stimulus_editor::StimulusEditorState;
 pub type CurveSetId = u64;
 pub type CurveId = u64;
 
-/// Which of a `CurveSet`'s two curve lists the Workspace window's left
-/// rail / graph is currently showing (design doc §2.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CurveListTab {
-    #[default]
-    Colorspace,
-    Isolated,
-}
-
 /// Everything the per-tab undo/redo stack (§4.3/§1.7) needs to restore -
 /// every field a Workspace editing surface can touch, *except* `dirty`/
 /// `revision`/`file_path`, which are bookkeeping, not user-visible data.
+/// The whole receptor pool is captured in pool order, along with the set's
+/// colorspace regimes (which own the opponent contrasts now, §2.2).
 #[derive(Clone, PartialEq)]
 pub struct EditableSnapshot {
-    pub colorspace: Vec<(CurveId, SpectralCurve)>,
-    pub isolated: Vec<(CurveId, SpectralCurve)>,
-    pub opponent_contrasts: Vec<OpponentContrast>,
+    pub curves: Vec<(CurveId, SpectralCurve)>,
+    pub regimes: Vec<AppRegime>,
     pub metadata: BTreeMap<String, String>,
     /// Set-level receptor operating-window defaults (§2.2) - part of the
     /// editable curve-set data, so undo/redo of a Workspace edit to them
@@ -67,17 +67,57 @@ pub struct EditableSnapshot {
     pub illumination_softness: Option<f64>,
 }
 
+/// The app-side mirror of `xenovision_core::curve_set::Regime`: a named
+/// colorspace over pool members, referenced by stable `CurveId`s (so a
+/// tab/selection/Comparison-window reference survives an edit elsewhere
+/// in the set). `to_core` maps the member ids onto pool indices.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppRegime {
+    pub name: String,
+    pub curves: Vec<CurveId>,
+    pub luminance_weights: Option<Vec<f64>>,
+    pub opponent_contrasts: Option<Vec<OpponentContrast>>,
+}
+
+impl AppRegime {
+    pub fn new(name: impl Into<String>, curves: Vec<CurveId>) -> Self {
+        AppRegime {
+            name: name.into(),
+            curves,
+            luminance_weights: None,
+            opponent_contrasts: None,
+        }
+    }
+}
+
+/// Maps an app regime (member `CurveId`s) to a core regime (pool
+/// indices), dropping members whose id isn't in the pool (a reconcile
+/// against a hand-edited file that deleted a curve).
+fn core_regime(r: &AppRegime, order: &[CurveId]) -> CoreRegime {
+    CoreRegime {
+        name: r.name.clone(),
+        curves: r
+            .curves
+            .iter()
+            .filter_map(|id| order.iter().position(|o| o == id).map(|i| i as u64))
+            .collect(),
+        luminance_weights: r.luminance_weights.clone(),
+        opponent_contrasts: r.opponent_contrasts.clone(),
+    }
+}
+
 /// App-level Curve Set (design doc §4.2): like `xenovision_core::CurveSet`,
 /// but curves are referenced by stable `CurveId` rather than held inline,
 /// so a tab/selection/Comparison-window reference survives an edit
-/// elsewhere in the set.
+/// elsewhere in the set. `curve_order` is the receptor pool order (what
+/// a regime's indices index into at the core level); `regimes` hold the
+/// colorspaces.
 pub struct AppCurveSet {
     pub id: CurveSetId,
     pub name: String,
-    pub colorspace_curves: Vec<CurveId>,
-    pub isolated_curves: Vec<CurveId>,
+    pub curve_order: Vec<CurveId>,
     pub curves: HashMap<CurveId, SpectralCurve>,
-    pub opponent_contrasts: Vec<OpponentContrast>,
+    pub regimes: Vec<AppRegime>,
     pub metadata: BTreeMap<String, String>,
     /// Set-level receptor operating-window defaults (§2.2): effective
     /// only for receptors whose own `illumination_min`/`max`/`softness`
@@ -88,26 +128,21 @@ pub struct AppCurveSet {
     pub illumination_softness: Option<f64>,
     pub file_path: Option<PathBuf>,
     pub dirty: bool,
-    /// Bumped on every edit affecting the receptor curves, opponent
-    /// contrasts, or luminance weights - `TransformCache`'s invalidation
-    /// key (§4.6).
+    /// Bumped on every edit affecting the receptor curves, regimes,
+    /// opponent contrasts, or luminance weights - `TransformCache`'s
+    /// invalidation key (§4.6).
     pub revision: u64,
 }
 
 impl AppCurveSet {
     pub fn snapshot(&self) -> EditableSnapshot {
         EditableSnapshot {
-            colorspace: self
-                .colorspace_curves
+            curves: self
+                .curve_order
                 .iter()
                 .map(|id| (*id, self.curves[id].clone()))
                 .collect(),
-            isolated: self
-                .isolated_curves
-                .iter()
-                .map(|id| (*id, self.curves[id].clone()))
-                .collect(),
-            opponent_contrasts: self.opponent_contrasts.clone(),
+            regimes: self.regimes.clone(),
             metadata: self.metadata.clone(),
             illumination_min: self.illumination_min,
             illumination_max: self.illumination_max,
@@ -119,15 +154,9 @@ impl AppCurveSet {
     /// `CurveId`s the snapshot itself carries (so undo/redo of a curve
     /// add/remove doesn't disturb the ids of curves that weren't touched).
     pub fn restore(&mut self, snap: &EditableSnapshot) {
-        self.colorspace_curves = snap.colorspace.iter().map(|(id, _)| *id).collect();
-        self.isolated_curves = snap.isolated.iter().map(|(id, _)| *id).collect();
-        self.curves = snap
-            .colorspace
-            .iter()
-            .chain(snap.isolated.iter())
-            .cloned()
-            .collect();
-        self.opponent_contrasts = snap.opponent_contrasts.clone();
+        self.curve_order = snap.curves.iter().map(|(id, _)| *id).collect();
+        self.curves = snap.curves.iter().cloned().collect();
+        self.regimes = snap.regimes.clone();
         self.metadata = snap.metadata.clone();
         self.illumination_min = snap.illumination_min;
         self.illumination_max = snap.illumination_max;
@@ -139,17 +168,16 @@ impl AppCurveSet {
     pub fn to_core(&self) -> CoreCurveSet {
         CoreCurveSet {
             name: self.name.clone(),
-            colorspace_curves: self
-                .colorspace_curves
+            curves: self
+                .curve_order
                 .iter()
                 .map(|id| self.curves[id].clone())
                 .collect(),
             metadata: self.metadata.clone(),
-            opponent_contrasts: self.opponent_contrasts.clone(),
-            isolated_curves: self
-                .isolated_curves
+            regimes: self
+                .regimes
                 .iter()
-                .map(|id| self.curves[id].clone())
+                .map(|r| core_regime(r, &self.curve_order))
                 .collect(),
             illumination_min: self.illumination_min,
             illumination_max: self.illumination_max,
@@ -172,10 +200,10 @@ impl AppCurveSet {
         self.to_core().receptor_noise().is_some()
     }
 
-    /// The integral-derived default luminance weight for the colorspace
-    /// curve at `index` (i.e. what applies when that curve has no
-    /// explicit `luminance_weight` override) - see
-    /// `xenovision_core::CurveSet::luminance_weights`.
+    /// The integral-derived default luminance weight for the pool curve
+    /// at `index` (i.e. what applies when that curve has no explicit
+    /// `luminance_weight` override) - see
+    /// `xenovision_core::CurveSet::luminance_weights` (pool-wide).
     pub fn luminance_weight_default(&self, index: usize) -> f64 {
         self.to_core()
             .luminance_weights(1.0)
@@ -187,27 +215,37 @@ impl AppCurveSet {
 
 fn from_core(core: CoreCurveSet, id: CurveSetId, next_id: &mut u64) -> AppCurveSet {
     let mut curves = HashMap::new();
-    let mut colorspace_curves = Vec::new();
-    for c in core.colorspace_curves {
+    let mut curve_order: Vec<CurveId> = Vec::with_capacity(core.curves.len());
+    for c in core.curves {
         let cid = *next_id;
         *next_id += 1;
-        colorspace_curves.push(cid);
+        curve_order.push(cid);
         curves.insert(cid, c);
     }
-    let mut isolated_curves = Vec::new();
-    for c in core.isolated_curves {
-        let cid = *next_id;
-        *next_id += 1;
-        isolated_curves.push(cid);
-        curves.insert(cid, c);
-    }
+    let regimes: Vec<AppRegime> = core
+        .regimes
+        .iter()
+        .map(|r| {
+            let mut member_ids = Vec::new();
+            for &i in &r.curves {
+                if let Some(&cid) = curve_order.get(i as usize) {
+                    member_ids.push(cid);
+                }
+            }
+            AppRegime {
+                name: r.name.clone(),
+                curves: member_ids,
+                luminance_weights: r.luminance_weights.clone(),
+                opponent_contrasts: r.opponent_contrasts.clone(),
+            }
+        })
+        .collect();
     AppCurveSet {
         id,
         name: core.name,
-        colorspace_curves,
-        isolated_curves,
+        curve_order,
         curves,
-        opponent_contrasts: core.opponent_contrasts,
+        regimes,
         metadata: core.metadata,
         illumination_min: core.illumination_min,
         illumination_max: core.illumination_max,
@@ -265,7 +303,11 @@ impl Default for NaturalSceneUiState {
 pub struct TabUiState {
     pub selected_curve: Option<CurveId>,
     pub selected_point: Option<usize>,
-    pub curve_tab: CurveListTab,
+    /// Which regime's curves the center graph shows; `None` = the whole
+    /// pooled receptor list. (Replaces the old colorspace/isolated
+    /// tab switcher - with one pooled list there's nothing to toggle
+    /// between; the filter is *which colorspace* to highlight.)
+    pub graph_regime: Option<usize>,
     pub undo: UndoManager<EditableSnapshot>,
     pub noise_omega_buf: String,
     pub noise_eta_buf: String,
@@ -296,7 +338,7 @@ impl Default for TabUiState {
         TabUiState {
             selected_curve: None,
             selected_point: None,
-            curve_tab: CurveListTab::default(),
+            graph_regime: None,
             undo: UndoManager::default(),
             noise_omega_buf: String::new(),
             noise_eta_buf: String::new(),
@@ -357,6 +399,13 @@ pub struct ComparisonState {
     pub reference_luminant: Option<CurveId>,
     pub metric: DistanceMetric,
     pub active_species_subtab: usize,
+    /// The regime each selected species' coordinate table currently
+    /// shows, keyed by species set id. Pills above each species' table
+    /// switch it (the dominant regime is marked); a multi-regime species
+    /// like the frog shows one regime's table at a time. Absent entry =
+    /// the dominant regime; regime-less species (mantis shrimp) display
+    /// the no-colorspace report instead, and never get an entry.
+    pub active_regime: HashMap<CurveSetId, usize>,
     /// Selected point index while editing the current reference
     /// luminant's curve directly in the Comparison window - kept here
     /// (not a throwaway per-frame local) so Delete-to-remove and the
@@ -398,13 +447,15 @@ impl Default for BatchExportState {
 }
 
 /// Cross-window-shared cache (design doc §4.6): keyed by (species set,
-/// reference luminant), invalidated when the set's `revision` no
-/// longer matches what the cached `Pipeline` was built from. `Pipeline`
-/// isn't `Clone`, so cache hits share one `Rc` rather than re-deriving
-/// the adaptation matrix.
+/// reference luminant), invalidated when the set's `revision` no longer
+/// matches what the cached pipelines were built from. `Pipeline` isn't
+/// `Clone`, so cache hits share one `Rc` rather than re-deriving each
+/// regime's adaptation matrix. The value is *all* of the set's regime
+/// pipelines in regime order - empty for a regime-less species (mantis
+/// shrimp, whose receptors are reported individually, §10.2).
 #[derive(Default)]
 pub struct TransformCache {
-    cache: HashMap<(CurveSetId, CurveId), (Rc<Pipeline>, u64)>,
+    cache: HashMap<(CurveSetId, CurveId), (Rc<Vec<Pipeline>>, u64)>,
 }
 
 impl TransformCache {
@@ -414,27 +465,32 @@ impl TransformCache {
         luminant_id: CurveId,
         luminant: &SpectralCurve,
         step_nm: f64,
-    ) -> Rc<Pipeline> {
-        if let Some((pipeline, rev)) = self.cache.get(&(set.id, luminant_id)) {
+    ) -> Rc<Vec<Pipeline>> {
+        if let Some((pipelines, rev)) = self.cache.get(&(set.id, luminant_id)) {
             if *rev == set.revision {
-                return Rc::clone(pipeline);
+                return Rc::clone(pipelines);
             }
         }
-        let pipeline = Rc::new(Pipeline::build(set.to_core(), luminant, step_nm));
+        let core = set.to_core();
+        let pipelines = Rc::new(
+            core.regimes
+                .iter()
+                .map(|r| Pipeline::build(core.regime_config(r), luminant, step_nm))
+                .collect::<Vec<_>>(),
+        );
         self.cache
-            .insert((set.id, luminant_id), (Rc::clone(&pipeline), set.revision));
-        pipeline
+            .insert((set.id, luminant_id), (Rc::clone(&pipelines), set.revision));
+        pipelines
     }
 
-    /// Drops every cached `Pipeline` built against `luminant_id`. A
-    /// cache entry's key is `(species, luminant)`, but its
-    /// invalidation above only checks the *species'* revision - editing
-    /// a luminant's own curve in place changes neither the species'
-    /// `CurveSet` nor its revision, so without this, an edited
-    /// luminant's stale `Pipeline` (built from its pre-edit curve)
-    /// would keep being reused for anything that still matches on id.
-    /// Call this whenever a luminant's curve content changes or it's
-    /// removed.
+    /// Drops every cached pipeline built against `luminant_id`. A cache
+    /// entry's key is `(species, luminant)`, but its invalidation above
+    /// only checks the *species'* revision - editing a luminant's own
+    /// curve in place changes neither the species' `CurveSet` nor its
+    /// revision, so without this, an edited luminant's stale pipelines
+    /// (built from its pre-edit curve) would keep being reused for
+    /// anything that still matches on id. Call this whenever a
+    /// luminant's curve content changes or it's removed.
     pub fn invalidate_luminant(&mut self, luminant_id: CurveId) {
         self.cache.retain(|&(_, iid), _| iid != luminant_id);
     }
@@ -567,6 +623,7 @@ impl AppState {
                 reference_luminant: Some(uniform_id),
                 metric: DistanceMetric::Euclidean,
                 active_species_subtab: 0,
+                active_regime: HashMap::new(),
                 luminant_selected_point: None,
                 luminant_scale_factor: 1.0,
                 luminant_target_power: 1.0,
