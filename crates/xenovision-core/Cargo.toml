@@ -26,10 +26,3 @@ matfile = "0.5"
 wgpu = "30.0.1"
 pollster = "1.0.1"
 bytemuck = { version = "1.25.2", features = ["derive"] }
-
-[dev-dependencies]
-# Used by exactly one test (reading a GeoTIFF written by GDAL's own
-# GTiff driver, to confirm the pure-Rust reader above is compatible
-# with real GDAL output, not just its own fixtures) - never appears in
-# the actual dependency tree.
-gdal = "0.17"

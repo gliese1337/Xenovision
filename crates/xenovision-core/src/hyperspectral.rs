@@ -964,9 +964,8 @@ mod tests {
 
     /// Mirrors the ENVI test above, but for GeoTIFF: confirms a
     /// `.tif`-extension path is routed to the GeoTIFF reader
-    /// (`geotiff::load_geotiff`, whose own tests separately confirm
-    /// compatibility with real GDAL-written files) and comes back with
-    /// pixel data intact and no fabricated wavelength metadata.
+    /// (`geotiff::load_geotiff`) and comes back with pixel data intact
+    /// and no fabricated wavelength metadata.
     #[test]
     fn load_envi_or_geotiff_reads_a_real_geotiff_file_correctly() {
         let dir = std::env::temp_dir().join(format!(

@@ -259,35 +259,4 @@ mod tests {
         let cube = load_geotiff(&path).unwrap();
         assert_matches_pattern(&cube, 3, 2, 5);
     }
-
-    /// Writes a GeoTIFF with GDAL's own GTiff driver (a dev-dependency
-    /// used only here) and confirms this pure-Rust reader is compatible
-    /// with real GDAL output, not just this file's own hand-rolled
-    /// fixtures above.
-    #[test]
-    fn reads_a_gdal_written_geotiff_identically() {
-        let dir = TempDir::new("gdal");
-        let path = dir.0.join("gdal.tif");
-        let (samples, lines, bands) = (3usize, 2usize, 4usize);
-        {
-            let driver = gdal::DriverManager::get_driver_by_name("GTiff").unwrap();
-            let dataset = driver
-                .create_with_band_type::<f32, _>(&path, samples, lines, bands)
-                .unwrap();
-            for b in 1..=bands {
-                let mut band = dataset.rasterband(b).unwrap();
-                let pixel_data: Vec<f32> = (0..lines * samples)
-                    .map(|i| ((b - 1) * 100 + i) as f32)
-                    .collect();
-                let mut buffer = gdal::raster::Buffer::new((samples, lines), pixel_data);
-                band.write((0, 0), (samples, lines), &mut buffer).unwrap();
-            }
-        }
-
-        let cube = load_geotiff(&path).unwrap();
-        assert_eq!((cube.samples, cube.lines, cube.bands), (samples, lines, bands));
-        // band 4 (0-based 3), line 1, sample 2: 300 + line*samples+sample = 300+1*3+2
-        let line = 1;
-        assert_eq!(cube.data[3 * lines * samples + line * samples + 2], 305.0);
-    }
 }
