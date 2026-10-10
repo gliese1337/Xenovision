@@ -489,12 +489,27 @@ pub fn frog_scotopic() -> CurveSet {
             "Denton & Wyllie 1955; Yovanovich et al. 2017",
         ),
     ];
+    // Rod-based regime: active when the light each rod actually absorbs
+    // (E_i = ∫S·I dλ) is at dim scotopic irradiances, gated off once the
+    // light gets bright (§2.2's operating window). Units are objective
+    // physical irradiance (W/m², treating luminant curves as spectral
+    // irradiance in W/m²/nm) - deliberately not a human-photometric
+    // measure, since the model is for the frog's own visual system.
+    // Bounds are ILLUSTRATIVE, not calibrated photometric values.
+    set.illumination_min = Some(1e-6);
+    set.illumination_max = Some(3e-2);
+    set.illumination_softness = Some(0.5);
     set.metadata.insert(
         "note".to_string(),
         "The dual rod system is functionally active at the same (very low) light levels - the \
          behavioral precondition for the scotopic colour discrimination documented in the cited \
          studies. Entirely independent of the photopic fixture: separate file, no shared \
-         calculation state, per the design doc's explicit no-mesopic-combination scoping."
+         calculation state, per the design doc's explicit no-mesopic-combination scoping. \
+         The set-level operating window gates each rod on the irradiance it actually absorbs \
+         from the reference light (E_i = ∫S·I dλ, W/m²): operating gain ~1 below ~1e-5 W/m², \
+         ramping off through the mesopic band (~0.01-0.1 W/m², where the photopic fixture's \
+         window begins). Window bounds are illustrative W/m² values, not calibrated \
+         photometric measurements."
             .to_string(),
     );
     note_generic_fallback(&mut set);
@@ -525,6 +540,31 @@ pub fn frog_photopic() -> CurveSet {
             "Koskelainen, Hemilä & Donner 1994; Liebman & Entine 1968",
         ),
     ];
+    // Cone-based regime: requires the light each cone actually absorbs
+    // (E_i = ∫S·I dλ) to be at bright photopic irradiances, gated off in
+    // dim light (§2.2's operating window). Units are objective physical
+    // irradiance (W/m², treating luminant curves as spectral irradiance
+    // in W/m²/nm) - not a human-photometric measure. No upper bound:
+    // cones keep operating in arbitrarily bright light (unlike rods,
+    // which is why the scotopic fixture has a max); receptor
+    // `saturation` caps the transduced signal instead. The overlap with
+    // the scotopic fixture's window (roughly 0.01-0.1 W/m² seen) is the
+    // mesopic band. Bounds are ILLUSTRATIVE, not calibrated photometric
+    // values.
+    set.illumination_min = Some(1e-2);
+    set.illumination_max = None;
+    set.illumination_softness = Some(0.5);
+    set.metadata.insert(
+        "note".to_string(),
+        "Entirely independent of the scotopic fixture: separate file, no shared calculation \
+         state, per the design doc's two-independent-systems framing (§2.3.10). The set-level \
+         operating window gates each cone on the irradiance it actually absorbs from the \
+         reference light (E_i = ∫S·I dλ, W/m²): gain ~1 in bright ambient light, gated off \
+         below the dim (scotopic) irradiances the rods handle. No upper window bound - cones \
+         don't stop operating in bright light, receptor `saturation` caps the signal instead. \
+         Window bounds are illustrative W/m² values, not calibrated photometric measurements."
+            .to_string(),
+    );
     set.metadata.insert(
         "contested_cone_note".to_string(),
         "The 502nm middle cone's status is contested: confirmed via microspectrophotometry in \
@@ -532,12 +572,6 @@ pub fn frog_photopic() -> CurveSet {
          Koskelainen lineage of work). This N=3 default is a documented assumption to verify per \
          species/study, not a settled fact - fork via Save As and remove this cone to model the \
          2-cone (red+blue) alternative."
-            .to_string(),
-    );
-    set.metadata.insert(
-        "note".to_string(),
-        "Entirely independent of the scotopic fixture: separate file, no shared calculation \
-         state, per the design doc's two-independent-systems framing (§2.3.10)."
             .to_string(),
     );
     note_generic_fallback(&mut set);
@@ -880,6 +914,57 @@ mod tests {
         // build and use both without one affecting the other.
         assert_pipeline_chroma_count(scotopic, 1);
         assert_pipeline_chroma_count(photopic, 2);
+    }
+
+    #[test]
+    fn frog_regimes_gate_the_other_way_at_opposite_light_levels() {
+        // §2.2's whole point for this species pair: under a dim light
+        // only the scotopic system operates, under a bright one only the
+        // photopic system does. Each receptor gates on the irradiance it
+        // actually sees from the reference light (E_i = ∫S_i·I dλ, W/m²
+        // under the W/m²/nm convention), via the fixtures' set-level
+        // windows and the real Pipeline. The flat illuminant at amplitude
+        // `power` gives each cone/rod a seen irradiance ≈ (template area
+        // ~tens of nm)·power, so the chosen powers land decisively
+        // inside/outside the regimes regardless of the exact template.
+        let scotopic = frog_scotopic();
+        let photopic = frog_photopic();
+        let illuminant_at = |power: f64| {
+            SpectralCurve::new("flat", CurveType::Illumination)
+                .with_points(vec![(WL_MIN, power), (WL_MAX, power)])
+        };
+
+        // power 1e-7 -> seen ≈ 1e-6..1e-5 W/m²: inside the scotopic
+        // window [1e-6, 3e-2], far below the photopic min 1e-2.
+        let dim = crate::pipeline::Pipeline::build(scotopic.clone(), &illuminant_at(1e-7), 1.0);
+        let dim_phot =
+            crate::pipeline::Pipeline::build(photopic.clone(), &illuminant_at(1e-7), 1.0);
+        assert!(
+            dim.is_active(),
+            "scotopic should be active in dim light (seen W/m²: {:?})",
+            dim.colorspace_seen_irradiances()
+        );
+        assert!(
+            !dim_phot.is_active(),
+            "photopic should be gated off in dim light (seen W/m²: {:?})",
+            dim_phot.colorspace_seen_irradiances()
+        );
+
+        // power 1.0 -> seen ≈ tens of W/m²: way above the scotopic max
+        // 3e-2, well inside the (unbounded-above) photopic window.
+        let bright = crate::pipeline::Pipeline::build(scotopic.clone(), &illuminant_at(1.0), 1.0);
+        let bright_phot =
+            crate::pipeline::Pipeline::build(photopic.clone(), &illuminant_at(1.0), 1.0);
+        assert!(
+            !bright.is_active(),
+            "scotopic should be gated off in bright light (seen W/m²: {:?})",
+            bright.colorspace_seen_irradiances()
+        );
+        assert!(
+            bright_phot.is_active(),
+            "photopic should be active in bright light (seen W/m²: {:?})",
+            bright_phot.colorspace_seen_irradiances()
+        );
     }
 
     #[test]

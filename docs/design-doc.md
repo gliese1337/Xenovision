@@ -22,6 +22,8 @@ A spectral curve is a general-purpose, typed container for arbitrary (wavelength
   - Quantity kind/unit is optional at curve creation for general use (display, editing); it is required only for operations that depend on physical unit consistency (§5.3.1).
 - **Interpolation**: monotonic cubic interpolation (e.g. Fritsch–Carlson or PCHIP-style) between points, used for both display and any calculation requiring a value at an arbitrary wavelength. Monotonic variants avoid overshoot artifacts (e.g. negative reflectance values) that plain cubic splines can introduce.
 - **Name/label**: human-readable identifier for the curve (e.g. "L-cone sensitivity", "Petal reflectance").
+- **Saturation cap**: optional per-curve maximum transduced signal — however much irradiance a receptor absorbs, its activation `Q_i` never exceeds this cap (§2.2.2). Blank = no cap. This is the *receptor's* ceiling, distinct from the derived *perceptual* saturation scalar (§2.2.5).
+- **Operating window** (§2.2.1): optional per-curve *illumination operating window* — a minimum and maximum ambient irradiance (W/m²) defining the range of light levels the receptor operates in, plus a shoulder softness (in log10 decades). Blank bound = no bound on that side; the Curve Set's operating-window defaults (§1.2.2) apply to any receptor without its own; blank everywhere = always operating.
 - **Optional metadata**: free-form key-value notes (e.g. source citation, measurement conditions, data-quality/provenance annotations).
 
 #### 1.2.2 Curve Set
@@ -32,6 +34,7 @@ A named collection of curves representing a coherent group — typically one spe
 - **Isolated curves**: a second, separate list of Spectral Curve objects kept with the set for completeness/inspection but excluded from the colorspace entirely - e.g. a species' photoreceptor classes that are documented but don't participate in color-opponent perception (§2.3.9's swallowtail butterfly), or - the extreme case - a species whose entire receptor set is isolated and whose colorspace list is empty (§10.2's Mantis Shrimp). Individual activations for isolated curves are still computable and displayable (§10.1) even though they never contribute to luminance or chroma.
 - **Optional metadata**: free-form notes at the set level (e.g. citation for the whole dataset).
 - **Opponent contrast definitions** (§4.2.4): optional set-level field storing literature-known opponent pairings as explicit structured data.
+- **Operating-window defaults** (§2.2.1): optional set-level minimum/maximum ambient irradiance (W/m²) and shoulder softness (decades), applied to every receptor that has no per-curve window of its own (§1.2.1).
 
 No deeper hierarchy (e.g. sub-groups within a set) is included.
 
@@ -107,12 +110,49 @@ Raw receptor sensitivity curves ┘                                          │
                                                               Saturation = ‖Chroma vector‖
 ```
 
+**Operating-window gating.** Each receptor `i` may carry an *illumination operating
+window* (§1.2.1): a minimum and maximum ambient irradiance, in **W/m²**, over which
+the receptor operates, plus a shoulder softness (in log10 decades). The gate is
+evaluated on the irradiance the receptor *actually absorbs* from the reference
+light, `E_i = ∫ S_i(λ)·I(λ) dλ` (§2.2.2) — under the document-wide unit convention
+that illuminant curves are spectral irradiance in **W/m²·nm**, `E_i` is itself a
+W/m² measure. Below the window's minimum the receptor gates off (gain → 0); above
+its maximum it gates back off; in between, its gain is ~1. Shoulders are logistic
+rather than hard edges, with softness expressed in decades of `log10(E)`; softness
+≤ 0 gives hard edges; a level of exactly zero (no light) reads as infinitely dark
+(effectively gated fully off); an invalid window (min ≤ 0, max ≤ 0, or min ≥ max)
+degrades to unbounded and is flagged to the user.
+
+The gating gain multiplies the receptor's activation *before* its `saturation` cap
+(§2.2.2), so every downstream stage — chromatic adaptation (§2.2.3), the
+luminance/opponent transform (§2.2.4), and saturation (§2.2.5) — sees the gated
+activation. This is what lets a fixed set of receptor curves produce different
+perceived colors purely as a function of the *total power* of the reference light:
+the same stimulus spectrum evaluated under a dim vs. bright reference gains up or
+gates off whole receptor classes, which is the model's mechanism for regime
+switching (the frog's scotopic/photopic pair, §2.3.10).
+
 #### 2.2.2 Step 1 — Raw receptor activation
 For each receptor type `i` with sensitivity curve `S_i(λ)`, and an incident spectrum `I(λ)`:
 ```
-Q_i = ∫ S_i(λ) · I(λ) dλ
+E_i = ∫ S_i(λ) · I(λ) dλ          (irradiance receptor i actually absorbs, W/m²)
+Q_i = saturate_i( g_i(E_i) · E_i )  (E_i multiplied by the operating-window gain, then saturation-capped)
 ```
-Computed numerically via the monotonic cubic interpolation (§1.2.1), over the union of wavelength support for `S_i` and `I`.
+`E_i` is computed numerically via the monotonic cubic interpolation (§1.2.1), over
+the union of wavelength support for `S_i` and `I`, treating each curve as zero
+outside its own domain. Under the unit convention that illuminant curves are
+spectral irradiance in W/m²·nm, `E_i` is the per-receptor ambient irradiance in
+W/m² — the objective, species-independent scale that the receptor's operating
+window (§2.2.1) gates on.
+
+The operating-window gain `g_i ∈ [0, 1]` is a logistic shoulder in `log10(E_i)`
+space between the window's bounds (§2.2.1); a missing bound is a gain of 1 on that
+side. The gain is applied before the receptor's `saturation` cap (a per-curve
+maximum transduced signal, §1.2.1; blank = no cap); a receptor that is gated off,
+or that saturates, reads as ~0 or as capped respectively in every downstream stage. The reference
+illuminant's own activations `Q_i^E` used by chromatic adaptation (§2.2.3) are
+computed with the same gating, so a reference light that lies outside a receptor's
+window gates that receptor out of the adapted space as well.
 
 #### 2.2.3 Step 2 — Chromatic adaptation
 The reference environmental spectrum `E(λ)` is the adapting white point; its per-receptor activation `Q_i^E` is computed per §2.2.2. Chromatic adaptation proceeds as:
@@ -164,7 +204,7 @@ Retained alongside (not instead of) the full chroma vector.
 
 Peak sensitivities (λmax) below are literature-sourced (see References). Ten species/systems are provided as default/example models (§7.1, §8) — nine distinct species plus frog's second, regime-specific system — spanning dichromats, trichromats, and tetrachromats across mammals, birds, fish, insects, and amphibians, with two species illustrating structural variations on the standard single-regime, single-Curve-Set model: swallowtail butterfly (§2.3.9) has a photoreceptor complement exceeding the receptor count used for color-opponent perception, and frog (§2.3.10) has two entirely separate, regime-specific visual systems (scotopic and photopic) rather than one. Curve shapes are generated using standard photopigment absorption templates (e.g. Govardovskii et al. 2000) parameterized by each λmax, rather than hand-digitized, unless higher-fidelity digitized curves are substituted. Template family (A1/A2 chromophore) is a generation-time detail, not a stored data field.
 
-**Note on mesopic vision**: several species in this document (notably frog, §2.3.10) have documented mesopic vision, in which rod and cone signals combine and jointly contribute to color perception at intermediate light levels, rather than operating as two cleanly separable regimes. This document does not model mesopic combination — each regime is modeled as an independent Curve Set with its own independent application of the full pipeline (§2.2), and no mechanism is specified for combining rod-regime and cone-regime receptor activations into a single joint perceptual calculation. This is a scoping boundary rather than an oversight: modeling mesopic combination would require specifying how rod and cone contributions are weighted relative to each other as a function of absolute light level, which is a substantially different kind of input (an illumination *intensity* parameter, not just a spectral shape) than anything else in this document's pipeline currently accepts.
+**Note on mesopic vision**: several species in this document (notably frog, §2.3.10) have documented mesopic vision, in which rod and cone signals combine and jointly contribute to color perception at intermediate light levels, rather than operating as two cleanly separable regimes. This document's default frog model keeps the two regimes as independent Curve Sets — each applying the full pipeline (§2.2) on its own, with no shared calculation state — but this is a *modeling default*, not a hard scoping boundary: since the pipeline accepts an absolute light level (the reference illuminant's W/m² irradiance via each receptor's operating window, §2.2.1), a **single** Curve Set containing both rod and cone receptors with overlapping but offset operating windows already expresses mesopic combination — the two receptor classes' gains are simply both nonzero in the overlap band. Nothing in the pipeline prevents that; §2.3.10's two-fixture split just keeps the shipped defaults separable and inspectable rather than shipping one blended system. (The two frog fixtures are explicitly independent: separate files, no shared calculation state.)
 
 #### 2.3.1 Human (*Homo sapiens*) — Trichromat (N=3)
 - **S-cone**: λmax ≈ 420 nm. **M-cone**: λmax ≈ 530 nm. **L-cone**: λmax ≈ 560 nm.
@@ -228,6 +268,18 @@ Effective sensitivity curve = opsin absorption curve (Govardovskii template at t
 - **Modeling decision**: per §2.2.4's exception-free rule (every receptor in a species' Curve Set contributes to both luminance and chroma, with no literature-based or otherwise evidenced exclusion permitted within that pipeline), the violet and broad-band curves are **not** included in the 4-receptor Curve Set used for the perceptual pipeline. Instead, they are stored as two additional Spectral Curves (§1.2.1, `Curve type = Sensitivity`) attached to the same species dataset for reference and completeness — preserving the full measured data — but explicitly outside the N=4 Curve Set that §2–§6's calculations operate on. This avoids weakening §2.2.4 into a rule with case-by-case exceptions, at the cost of the butterfly's default model representing color vision only, not the complete photoreceptor complement.
 - **Luminance weighting**: not explicitly documented in the literature reviewed for the 4 color-vision receptors; defaults to uniform weighting, flagged as an approximation consistent with how other species lacking literature luminance data are treated (§2.3.2, §2.3.5–2.3.8).
 - **Opponent pairing**: no butterfly-specific literature opponent-pairing mechanism (i.e. which receptors oppose which, analogous to human L−M) was located; the four color-vision receptors use the generic per-receptor candidate contrast (§2.2.4), orthogonalized against luminance to yield 3 independent chroma channels.
+
+#### 2.3.10 Frog (*Rana* spp.) — Two Regime-Specific Systems, Scotopic + Photopic
+
+Frog color vision is modeled as two entirely independent visual systems — one per light regime, per the mesopic note above — each shipped as its own Curve Set and file (§8.3). They share no calculation state; the split is a modeling default (a single set whose receptors carry overlapping but offset operating windows would already express mesopic combination, §2.2.1), not a mathematical necessity.
+
+**Scotopic (rod) system — N=2**: the dual rod system — **Green rod** (λmax ≈ 433 nm) and **Red rod** (λmax ≈ 502 nm) — which supports scotopic color discrimination at very low absolute light levels (Denton & Wyllie 1955; Yovanovich et al. 2017). Single chroma channel (N-1=1) via the generic N=2 construction of §2.2.4; luminance weighting uniform. **Operating window** (set-level, W/m² as seen by each receptor, §2.2.1): min `1e-6`, max `3e-2`, softness `0.5` decades — rods fully on in dim scotopic light, gating off through the mesopic band (~0.01–0.1 W/m²) into bright photopic light.
+
+**Photopic (cone) system — N=3**: **Blue cone** (λmax ≈ 431 nm), **Middle/green cone** (λmax ≈ 502 nm — contested, see below), and **Red cone** (λmax ≈ 580 nm) (Koskelainen, Hemilä & Donner 1994; Liebman & Entine 1968). Two chroma channels via the generic §2.2.4 construction; luminance weighting uniform with all three cones contributing (the same all-measured-mechanisms-included choice as cat, §2.3.3). **Operating window**: min `1e-2`, no maximum — cones keep operating in arbitrarily bright light (the receptor `saturation` cap, §1.2.1, bounds the signal instead) — softness `0.5` decades; cones are gated off in dim (scotopic) light and fully on in bright light.
+
+**The contested middle cone**: the 502 nm green cone is confirmed via microspectrophotometry in some species/studies but reported absent/contentious in others (e.g. *R. temporaria* per the Koskelainen lineage of work). The N=3 default is a documented modeling assumption, explicitly flagged in the fixture's metadata — a user who prefers the 2-cone (red+blue) alternative forks it via Save As (§9) and removes this cone.
+
+All window bounds in this section are **illustrative W/m² modeling choices, not calibrated photometric measurements**; the operating-window mechanism itself is what reproduces the documented fact that frog perception changes with absolute light level (scotopic vs. photopic regime).
 
 
 
@@ -509,6 +561,7 @@ All data used by the 7 default species models is representable in the generic da
 | Relative receptor density (`η`) | §4.2.2 |
 | Luminance weight (`w_i`) | §4.2.3 — per-curve field, curve-integral-derived default, explicitly overridable |
 | Opponent contrast definitions | §4.2.4 — per-set field storing literature-known pairings as explicit structured data, falling back to the generic per-receptor formula when absent |
+| Receptor operating window | §2.2.1 — optional per-curve and set-level default min/max ambient irradiance (W/m²) + softness (decades); blank = unbounded, so every legacy fixture loads unmodified |
 | Oil droplet transmittance (pigeon) | §2.3.5 — a second composited curve |
 
 | Literature citations / provenance | §1.2.1 optional metadata (free-form) |
@@ -545,7 +598,7 @@ Save As applies uniformly to both the default preset species/systems (§2.3, §8
 **Relationship to §8.3's fixture recovery**: Save As is distinct from "restore defaults." Editing a preset's file directly and then using "restore defaults" reverts that preset to its pristine shipped state; using Save As on a preset instead creates an independent new file, leaving the preset's original file untouched throughout — a user who forks a preset via Save As does not need "restore defaults" to recover the original, since it was never modified.
 
 ### 9.4 Copy Semantics
-Save As performs a full deep copy of the Curve Set's complete current state into the new file — all receptor curves and their point data, all per-curve fields (`ω`, `η`, `w_i`, quantity kind, metadata), and any set-level opponent contrast definitions — duplicated unchanged into the new Curve Set. Nothing is reset to defaults on fork. Subsequent edits to either copy do not affect the other.
+Save As performs a full deep copy of the Curve Set's complete current state into the new file — all receptor curves and their point data, all per-curve fields (`ω`, `η`, `w_i`, receptor saturation cap, operating window, quantity kind, metadata), and any set-level opponent contrast definitions and operating-window defaults — duplicated unchanged into the new Curve Set. Nothing is reset to defaults on fork. Subsequent edits to either copy do not affect the other.
 
 ---
 
@@ -560,7 +613,7 @@ Recorded for future scheduling; not yet designed in further detail or implemente
 ~~Add a Mantis Shrimp (Stomatopoda) species model whose defining characteristic is that **none** of its photoreceptors participate in opponent-process colorspace construction~~ — implemented as a 13th built-in fixture: 12 photoreceptor classes (illustrative λmax values spanning UV to red), all isolated, with an **empty** colorspace set — the first fixture with zero colorspace receptors, exercising `derive_adaptation_matrix`'s `n == 0` case (a trivial 0×0 identity, the same reasoning as its `n == 1` case). Every other part of `Pipeline` (candidate rows, chroma axis construction, `coordinates`) handles N=0 correctly without further special-casing, matching §8.2's representability claim even for this edge case.
 
 ### 10.3 Replace GDAL with a Pure-Rust Implementation — IMPLEMENTED
-~~§3.4.1 implemented ENVI and GeoTIFF reading via the `georust/gdal` crate, which brought in GDAL as a large native C/C++ library dependency rather than a pure-Rust one - a cost specific to this app's cross-platform-desktop-application requirement (§1 implies this explicitly): GDAL has no Linux-`pkg-config`-level convenience on Windows (typically vcpkg/conda-forge/OSGeo4W instead), and the GDAL shared library had to be present at runtime on every machine the app shipped to, not just at build time.~~ — replaced by a hand-written ENVI header/BSQ-BIL-BIP parser (`envi.rs`) and the pure-Rust `tiff` crate for GeoTIFF (`geotiff.rs`), with GDAL kept only as a dev-dependency for one cross-validation test (confirming the GeoTIFF reader opens real GDAL-written files identically, not just its own fixtures). The resulting release binary links nothing beyond the C library every Rust binary already needs (`libc`/`libgcc_s`/`libm`), confirmed via `ldd` - no PROJ/GEOS/GDAL, and no per-platform GDAL install step in `BUILDING.md` anymore.
+~~§3.4.1 implemented ENVI and GeoTIFF reading via the `georust/gdal` crate, which brought in GDAL as a large native C/C++ library dependency rather than a pure-Rust one - a cost specific to this app's cross-platform-desktop-application requirement (§1 implies this explicitly): GDAL has no Linux-`pkg-config`-level convenience on Windows (typically vcpkg/conda-forge/OSGeo4W instead), and the GDAL shared library had to be present at runtime on every machine the app shipped to, not just at build time.~~ — replaced by a hand-written ENVI header/BSQ-BIL-BIP parser (`envi.rs`) and the pure-Rust `tiff` crate for GeoTIFF (`geotiff.rs`), with GDAL removed entirely - including from the test suite, since the pure-Rust readers now cover every file read. The resulting release binary links nothing beyond the C library every Rust binary already needs (`libc`/`libgcc_s`/`libm`), confirmed via `ldd` - no PROJ/GEOS/GDAL, and no per-platform GDAL install step in `BUILDING.md` anymore.
 
 ### 10.4 Comprehensive UI/UX Review
 A dedicated pass over the whole application's user interface and user experience, as opposed to the feature-by-feature, section-by-section review this document's development has used so far (each phase's UI landing alongside its own calculation logic, reviewed in isolation). Scope not yet defined - likely candidates include overall information architecture/navigation now that there are eight functional sections, consistency of terminology and interaction patterns across sections that were built at different times (e.g. "+Add"/"Remove" button phrasing, selector-row vs. checkbox-list conventions, status-message placement), discoverability of features that currently require scrolling through a long single-page layout, and a pass for plain-language clarity consistent with the earlier "build for the user, not an implementation auditor" feedback. Not scheduled; recorded as a known gap rather than assumed to be covered by the per-section reviews already done.

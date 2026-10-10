@@ -56,6 +56,7 @@ Other terms used throughout:
 | **η (relative density)** | Per-receptor density, meaningful relative to the other receptors in the same set. Also blank-means-no-data. |
 | **w_i (luminance weight)** | How much a receptor contributes to luminance. Blank = integral-derived default; set it to override. |
 | **Receptor saturation** | The maximum signal a receptor can produce, however much power reaches it - its activation is capped at this value. Blank = no cap. Distinct from the perceptual *saturation* in Comparison's coordinate table (below). |
+| **Operating window** | The range of ambient irradiance (W/m²) a receptor operates in, as seen by that receptor (the light its own sensitivity absorbs from the reference). Below the window's minimum or above its maximum the receptor gates off; between them its gain is ~1, with soft logistic shoulders (blank = use the Curve Set's defaults; blank everywhere = always on). This is how the same eye produces different color perceptions at dim vs. bright light levels - e.g. the frog's scotopic and photopic fixtures. |
 | **Saturation / hue angle** | For a species with N > 2 receptors, the chroma vector's length (saturation) and its N-2 hyperspherical angles (hue) - shown alongside luminance/chroma in Comparison's coordinate table. |
 | **ΔS** | Vorobyev-Osorio perceptual distance (JND units) - needs ω and η on every receptor of the system being evaluated. |
 
@@ -124,9 +125,13 @@ is re-derived. Smaller systems take milliseconds.
 whichever point is currently selected on the graph (not a table of every
 point - that overwhelmed the panel and was removed); noise/luminance fields
 (colorspace curves only: ω, η, w_i); receptor saturation (every curve,
-colorspace or isolated); free-form metadata; and an amber
-validation flag if η is set on *some but not all* colorspace curves in the
-set.
+colorspace or isolated); the receptor's operating window (W/m² seen-irradiance
+min/max + shoulder softness, with the effective window - including the set's
+defaults - shown beneath); the set's operating-window defaults (always shown,
+top of the inspector; applies to any receptor without its own window); free-form
+metadata; and an amber validation flag if η is set on *some but not all*
+colorspace curves in the set, or if any operating window is malformed
+(min ≥ max, or a non-positive bound).
 
 **File menu**
 
@@ -147,12 +152,14 @@ LED, each tagged Radiance automatically) and makes it active; with one
 selected, a name field and the same drag-to-edit graph as Workspace appear
 below it. **Remove this luminant** deletes the active one.
 
-Under the luminant's graph, its total integrated power is shown with two
-ways to change it without altering its spectral shape: **Scale by** (enter
-a factor, then Apply) or **Set total power to** (enter a target, then Set -
-disabled for a zero-power curve). This matters once receptors have a
-saturation cap: the same spectrum at higher power can push receptors into
-their caps and change the results.
+Under the luminant's graph, its total irradiance is shown (W/m², integrated
+over its domain — under Xenovision's convention luminant curves are spectral
+irradiance in W/m²/nm) with two ways to change it without altering its spectral
+shape: **Scale by** (enter a factor, then Apply) or **Set total power to** (enter
+a target, then Set - disabled for a zero-power curve). This matters once receptors
+have a saturation cap **or an operating window** (below): the same spectrum at
+higher power can push receptors into their caps, gate whole receptor classes on
+or off across an operating window, and so change the results.
 
 **Apply absorption** (below that) multiplies the luminant by an absorption
 curve from the Stimulus Editor's library, raised to the chosen **weight**.

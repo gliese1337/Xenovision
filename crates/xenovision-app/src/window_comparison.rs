@@ -262,7 +262,7 @@ fn luminant_power_control(ui: &mut egui::Ui, app: &mut AppState, id: CurveId) {
     };
     let total = curve.integral(STEP_NM);
     ui.label(format!(
-        "Total power (integrated over its domain): {total:.4}"
+        "Irradiance (W/m², ∫ over domain): {total:.3}"
     ));
 
     let mut factor: Option<f64> = None;
@@ -525,6 +525,47 @@ fn single_species_tables(
         .get_or_build(set, luminant_id, luminant, STEP_NM);
 
     let coords: Vec<Coordinates> = stimuli.iter().map(|s| pipeline.coordinates(s)).collect();
+
+    // Operating state: each receptor gates on the irradiance it actually
+    // absorbs from the reference light (E_i = ∫S·I dλ, W/m²). This is
+    // what makes the same spectrum read differently at different total
+    // power levels (scotopic vs photopic regime).
+    if pipeline.is_active() {
+        ui.label(format!(
+            "Reference light: {:.3} W/m² total — operating.",
+            pipeline.reference_irradiance_w_m2()
+        ));
+    } else {
+        ui.colored_label(
+            egui::Color32::from_rgb(220, 180, 40),
+            format!(
+                "Reference light: {:.3} W/m² total — every receptor is gated off at \
+                 this light level, so all coordinates are ~0.",
+                pipeline.reference_irradiance_w_m2()
+            ),
+        );
+    }
+    let names = pipeline.colorspace_curve_names();
+    let seen = pipeline.colorspace_seen_irradiances();
+    let gains = pipeline.response_gains();
+    if !names.is_empty() && seen.len() == names.len() && gains.len() == names.len() {
+        ui.label("Receptor operating state (each gates on the irradiance it absorbs from the reference light):");
+        egui::Grid::new(("op_state", set_id))
+            .striped(true)
+            .show(ui, |ui| {
+                ui.label("Receptor");
+                ui.label("Seen irradiance (W/m²)");
+                ui.label("Gain");
+                ui.end_row();
+                for (i, name) in names.iter().enumerate() {
+                    ui.label(*name);
+                    ui.label(format!("{:.3e}", seen[i]));
+                    ui.label(format!("{:.3}", gains[i]));
+                    ui.end_row();
+                }
+            });
+    }
+    ui.separator();
 
     // Saturation + hue angles are only shown for N > 2 (chroma.len() > 1)
     // - a dichromat's single signed chroma value already carries its

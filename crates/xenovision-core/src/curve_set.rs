@@ -46,6 +46,24 @@ pub struct CurveSet {
     /// no code path that assumes which species does.
     #[serde(default)]
     pub isolated_curves: Vec<SpectralCurve>,
+
+    /// Set-level default lower bound for receptor operating windows
+    /// (§2.2) - applies to any curve whose own `illumination_min` is
+    /// unset. Units: ambient irradiance W/m²
+    /// (`illumination::irradiance_w_m2` convention). `None` means no
+    /// lower bound. Lets a whole regime-specific system (e.g. a scotopic
+    /// or photopic Curve Set) be characterized once instead of on every
+    /// receptor.
+    #[serde(default)]
+    pub illumination_min: Option<f64>,
+    /// Set-level default upper bound for receptor operating windows, same
+    /// fallback semantics as `illumination_min`. Units: W/m².
+    #[serde(default)]
+    pub illumination_max: Option<f64>,
+    /// Set-level default shoulder width (decades) for receptor operating
+    /// windows, used when a curve sets a bound but no explicit softness.
+    #[serde(default)]
+    pub illumination_softness: Option<f64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -72,7 +90,99 @@ impl CurveSet {
             metadata: BTreeMap::new(),
             opponent_contrasts: Vec::new(),
             isolated_curves: Vec::new(),
+            illumination_min: None,
+            illumination_max: None,
+            illumination_softness: None,
         }
+    }
+
+    /// Effective operating window for one curve: its own bound if set,
+    /// else the set-level default.
+    fn effective_illumination_window(
+        &self,
+        curve: &SpectralCurve,
+    ) -> (Option<f64>, Option<f64>) {
+        (
+            curve.illumination_min.or(self.illumination_min),
+            curve.illumination_max.or(self.illumination_max),
+        )
+    }
+
+    /// The effective softness for one curve: its own if set, else the
+    /// set-level default, else `DEFAULT_ILLUMINATION_SOFTNESS`.
+    fn effective_illumination_softness(&self, curve: &SpectralCurve) -> f64 {
+        curve
+            .illumination_softness
+            .or(self.illumination_softness)
+            .unwrap_or(crate::curve::DEFAULT_ILLUMINATION_SOFTNESS)
+    }
+
+    /// Per-receptor operating gains `g_i` (§2.2) for this set's colorspace
+    /// curves, in order, from the irradiance **each receptor actually
+    /// sees** (`seen_irradiances[i] = ∫ S_i(λ)·I(λ) dλ`, in W/m² under
+    /// the convention that luminant curves are spectral irradiance in
+    /// W/m²/nm and receptor sensitivities are dimensionless weights).
+    /// Gating on the receptor-filtered ambient light means e.g. a
+    /// short-wavelength receptor is not gated on just because the room
+    /// is bright at long wavelengths - the light that matters is the
+    /// light that receptor absorbs. `seen_irradiances` must parallel
+    /// `colorspace_curves`; the pipeline caller owns the integration
+    /// (`pipeline::integrate_product`). A curve with no effective bounds
+    /// gets gain 1.0 (always on), preserving the pre-existing behavior.
+    pub fn colorspace_gating_gains(&self, seen_irradiances: &[f64]) -> Vec<f64> {
+        self.colorspace_curves
+            .iter()
+            .zip(seen_irradiances)
+            .map(|(c, &seen)| {
+                let (lo, hi) = self.effective_illumination_window(c);
+                crate::curve::operating_gain(seen, lo, hi, self.effective_illumination_softness(c))
+            })
+            .collect()
+    }
+
+    /// Per-receptor operating gains for this set's isolated curves, in
+    /// order (§2.2), from the same receptor-filtered seen irradiances as
+    /// `colorspace_gating_gains`. Isolated curves never enter the
+    /// opponent pipeline, but their individual activations (§10.1) are
+    /// still reported, so their own operating windows are still honored.
+    pub fn isolated_gating_gains(&self, seen_irradiances: &[f64]) -> Vec<f64> {
+        self.isolated_curves
+            .iter()
+            .zip(seen_irradiances)
+            .map(|(c, &seen)| {
+                let (lo, hi) = self.effective_illumination_window(c);
+                crate::curve::operating_gain(seen, lo, hi, self.effective_illumination_softness(c))
+            })
+            .collect()
+    }
+
+    /// `true` if any curve in this set (colorspace or isolated, or the
+    /// set-level defaults) declares a malformed illumination window - a
+    /// non-positive bound, or `min >= max`. Used to surface the mistake
+    /// in the UI; calculation treats such a window as unbounded.
+    pub fn has_invalid_illumination_window(&self) -> bool {
+        let set_crossed = matches!(
+            (self.illumination_min, self.illumination_max),
+            (Some(lo), Some(hi)) if lo >= hi
+        );
+        set_crossed
+            || [self.illumination_min, self.illumination_max]
+                .into_iter()
+                .flatten()
+                .any(|b| b <= 0.0)
+            || self
+                .colorspace_curves
+                .iter()
+                .chain(self.isolated_curves.iter())
+                .any(|c| {
+                    c.has_invalid_illumination_window()
+                        || {
+                            // Per-curve bounds can also cross the set
+                            // default they fall back to.
+                            let (lo, hi) = self.effective_illumination_window(c);
+                            matches!((lo, hi), (Some(lo), Some(hi)) if lo >= hi)
+                        }
+                })
     }
 
     /// The candidate opponent-contrast rows to use for this set's chroma
@@ -288,6 +398,79 @@ mod tests {
     #[test]
     fn round_trip_json_in_memory() {
         let set = sample_set();
+        let json = serde_json::to_string(&set).unwrap();
+        let back: CurveSet = serde_json::from_str(&json).unwrap();
+        assert_eq!(set, back);
+    }
+
+    #[test]
+    fn gating_gains_use_per_curve_then_set_default_then_unbounded() {
+        let mut set = sample_set();
+        // No windows anywhere -> all gains 1 for any seen irradiance
+        // (always on, as before).
+        let all_on = sample_set().colorspace_gating_gains(&[1e-9, 1e9]);
+        assert_eq!(all_on, vec![1.0, 1.0]);
+
+        // Set-level default applies to curves without their own bounds.
+        set.illumination_min = Some(1e-3);
+        set.illumination_max = Some(1e-1);
+        set.illumination_softness = Some(0.25);
+        // Both receptors "see" 0.045 W/m² (mid-window) -> both on.
+        let both_on = set.colorspace_gating_gains(&[0.045, 0.045]);
+        assert!(
+            both_on[0] > 0.9 && both_on[1] > 0.9,
+            "both inside set window at 0.045 W/m²: {both_on:?}"
+        );
+
+        // A per-curve window overrides the set default.
+        set.colorspace_curves[0] = set.colorspace_curves[0]
+            .clone()
+            .with_illumination_window(Some(1e1), Some(1e3));
+        let overridden = set.colorspace_gating_gains(&[0.045, 0.045]);
+        assert!(
+            overridden[0] < 1e-3 && overridden[1] > 0.9,
+            "curve 0 should use its own bright window: {overridden:?}"
+        );
+    }
+
+    #[test]
+    fn isolated_gating_gains_are_computed_independently() {
+        let mut set = sample_set();
+        set.isolated_curves = vec![
+            SpectralCurve::new("Isolated", CurveType::Sensitivity)
+                .with_illumination_window(Some(1e1), Some(1e3)),
+        ];
+        set.illumination_min = Some(1e-3);
+        set.illumination_max = Some(1e-1);
+        // The isolated curve has its own window, which wins over the set
+        // default: at 100 W/m² seen it is mid-window...
+        let mid = set.isolated_gating_gains(&[100.0]);
+        assert!(mid[0] > 0.95, "isolated curve own window wins: {mid:?}");
+        // ...and far below its 1e1 min it is gated off.
+        let dark = set.isolated_gating_gains(&[0.045]);
+        assert!(dark[0] < 1e-3, "gated off below its own min: {dark:?}");
+    }
+
+    #[test]
+    fn invalid_illumination_windows_are_flagged() {
+        let mut set = sample_set();
+        assert!(!set.has_invalid_illumination_window());
+
+        set.colorspace_curves[0].illumination_min = Some(10.0);
+        set.colorspace_curves[0].illumination_max = Some(1.0);
+        assert!(set.has_invalid_illumination_window());
+        set.colorspace_curves[0] = SpectralCurve::new("S-cone", CurveType::Sensitivity);
+
+        set.illumination_min = Some(-1.0);
+        assert!(set.has_invalid_illumination_window());
+    }
+
+    #[test]
+    fn illumination_window_fields_round_trip_with_the_set() {
+        let mut set = sample_set();
+        set.illumination_min = Some(0.01);
+        set.illumination_max = Some(100.0);
+        set.illumination_softness = Some(0.3);
         let json = serde_json::to_string(&set).unwrap();
         let back: CurveSet = serde_json::from_str(&json).unwrap();
         assert_eq!(set, back);

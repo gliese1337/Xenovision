@@ -4,6 +4,29 @@
 
 use crate::curve::{CurveType, QuantityKind, SpectralCurve};
 
+/// A standard luminant curve's values are interpreted as spectral
+/// irradiance in **W/m²/nm**, so integrating over wavelength yields a
+/// total irradiance in **W/m²** - an objective physical unit, with no
+/// human-visual (photometric, V(λ)-weighted) normalization. Because the
+/// model is for non-human visual systems too (frogs, goldfish, mantis
+/// shrimp...), receptor operating regimes (§2.2) are stated in these
+/// physical units rather than luminous ones.
+///
+/// The total irradiance of an illuminant:
+/// `irradiance_w_m2 = ∫ I(λ) dλ`. Under this convention the built-in
+/// Uniform reference light (flat 1.0 over 300-750 nm) is 450 W/m².
+///
+/// Note that receptor *gating* (§2.2) does **not** use this unfiltered
+/// total: a receptor sees only the light its own sensitivity passes, so
+/// the pipeline gates each receptor on its receptor-filtered value
+/// `E_i = ∫ S_i(λ)·I(λ) dλ` (still W/m²), computed in
+/// `pipeline::Pipeline::build`. This function is the documented total
+/// for display (the Comparison window's reference-light readout) and for
+/// standardizing what a given luminant curve means in physical units.
+pub fn irradiance_w_m2(illuminant: &SpectralCurve, step_nm: f64) -> f64 {
+    illuminant.integral(step_nm)
+}
+
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ReflectanceError {
     #[error("{curve_name} has no quantity kind/unit specified - set it to Radiance before deriving reflectance")]
@@ -239,6 +262,21 @@ mod tests {
     fn flat(name: &str, lo: f64, hi: f64, v: f64) -> SpectralCurve {
         SpectralCurve::new(name, CurveType::Other(String::new()))
             .with_points(vec![(lo, v), (hi, v)])
+    }
+
+    #[test]
+    fn irradiance_w_m2_is_the_plain_total_integral() {
+        // Under the W/m²/nm convention the flat-1.0 Uniform reference
+        // light (300-750nm) has exactly 450 W/m², and the scalar is a
+        // straight physical integral - no human-photometric weighting.
+        let uniform = flat("uniform", 300.0, 750.0, 1.0);
+        assert!((irradiance_w_m2(&uniform, 1.0) - 450.0).abs() < 1e-9);
+        // Double the amplitude -> double the irradiance.
+        let doubled = flat("double", 300.0, 750.0, 2.0);
+        assert!((irradiance_w_m2(&doubled, 1.0) - 900.0).abs() < 1e-9);
+        // An empty curve has no power.
+        let empty = SpectralCurve::new("empty", CurveType::Illumination);
+        assert_eq!(irradiance_w_m2(&empty, 1.0), 0.0);
     }
 
     #[test]

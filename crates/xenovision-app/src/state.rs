@@ -59,6 +59,12 @@ pub struct EditableSnapshot {
     pub isolated: Vec<(CurveId, SpectralCurve)>,
     pub opponent_contrasts: Vec<OpponentContrast>,
     pub metadata: BTreeMap<String, String>,
+    /// Set-level receptor operating-window defaults (§2.2) - part of the
+    /// editable curve-set data, so undo/redo of a Workspace edit to them
+    /// restores the window state too.
+    pub illumination_min: Option<f64>,
+    pub illumination_max: Option<f64>,
+    pub illumination_softness: Option<f64>,
 }
 
 /// App-level Curve Set (design doc §4.2): like `xenovision_core::CurveSet`,
@@ -73,6 +79,13 @@ pub struct AppCurveSet {
     pub curves: HashMap<CurveId, SpectralCurve>,
     pub opponent_contrasts: Vec<OpponentContrast>,
     pub metadata: BTreeMap<String, String>,
+    /// Set-level receptor operating-window defaults (§2.2): effective
+    /// only for receptors whose own `illumination_min`/`max`/`softness`
+    /// fields are unset. Units: ambient irradiance W/m² (min/max), and
+    /// decimals-of-a-decade shoulder width (softness).
+    pub illumination_min: Option<f64>,
+    pub illumination_max: Option<f64>,
+    pub illumination_softness: Option<f64>,
     pub file_path: Option<PathBuf>,
     pub dirty: bool,
     /// Bumped on every edit affecting the receptor curves, opponent
@@ -96,6 +109,9 @@ impl AppCurveSet {
                 .collect(),
             opponent_contrasts: self.opponent_contrasts.clone(),
             metadata: self.metadata.clone(),
+            illumination_min: self.illumination_min,
+            illumination_max: self.illumination_max,
+            illumination_softness: self.illumination_softness,
         }
     }
 
@@ -113,6 +129,9 @@ impl AppCurveSet {
             .collect();
         self.opponent_contrasts = snap.opponent_contrasts.clone();
         self.metadata = snap.metadata.clone();
+        self.illumination_min = snap.illumination_min;
+        self.illumination_max = snap.illumination_max;
+        self.illumination_softness = snap.illumination_softness;
         self.revision += 1;
         self.dirty = true;
     }
@@ -132,11 +151,21 @@ impl AppCurveSet {
                 .iter()
                 .map(|id| self.curves[id].clone())
                 .collect(),
+            illumination_min: self.illumination_min,
+            illumination_max: self.illumination_max,
+            illumination_softness: self.illumination_softness,
         }
     }
 
     pub fn has_partial_eta_coverage(&self) -> bool {
         self.to_core().has_partial_eta_coverage()
+    }
+
+    /// `true` if any receptor or the set-level defaults declare a
+    /// malformed operating window (non-positive bound, or `min >= max`) -
+    /// calculation treats it as unbounded, and the Workspace warns (§2.2).
+    pub fn has_invalid_illumination_window(&self) -> bool {
+        self.to_core().has_invalid_illumination_window()
     }
 
     pub fn receptor_noise_complete(&self) -> bool {
@@ -180,6 +209,9 @@ fn from_core(core: CoreCurveSet, id: CurveSetId, next_id: &mut u64) -> AppCurveS
         curves,
         opponent_contrasts: core.opponent_contrasts,
         metadata: core.metadata,
+        illumination_min: core.illumination_min,
+        illumination_max: core.illumination_max,
+        illumination_softness: core.illumination_softness,
         file_path: None,
         dirty: false,
         revision: 0,
@@ -240,6 +272,18 @@ pub struct TabUiState {
     pub noise_w_buf: String,
     pub sat_buf: String,
     pub sat_buf_for: Option<CurveId>,
+    /// Operating-window (§2.2) per-curve editing buffers and the curve
+    /// they currently show, or `None` when they need reloading.
+    pub ill_min_buf: String,
+    pub ill_max_buf: String,
+    pub ill_soft_buf: String,
+    pub ill_buf_for: Option<CurveId>,
+    /// Set-level operating-window-default editing buffers and the set
+    /// they currently show.
+    pub set_ill_min_buf: String,
+    pub set_ill_max_buf: String,
+    pub set_ill_soft_buf: String,
+    pub set_ill_buf_for: Option<CurveSetId>,
     pub noise_buf_for: Option<CurveId>,
     pub save_path_buf: String,
     pub csv_path_buf: String,
@@ -259,6 +303,14 @@ impl Default for TabUiState {
             noise_w_buf: String::new(),
             sat_buf: String::new(),
             sat_buf_for: None,
+            ill_min_buf: String::new(),
+            ill_max_buf: String::new(),
+            ill_soft_buf: String::new(),
+            ill_buf_for: None,
+            set_ill_min_buf: String::new(),
+            set_ill_max_buf: String::new(),
+            set_ill_soft_buf: String::new(),
+            set_ill_buf_for: None,
             noise_buf_for: None,
             save_path_buf: "visual_system.json".to_string(),
             csv_path_buf: "curve.csv".to_string(),

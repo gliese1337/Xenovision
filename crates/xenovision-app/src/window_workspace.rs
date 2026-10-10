@@ -262,6 +262,9 @@ fn tab_bar(ui: &mut egui::Ui, app: &mut AppState) {
                     curves: std::collections::HashMap::new(),
                     opponent_contrasts: Vec::new(),
                     metadata: std::collections::BTreeMap::new(),
+                    illumination_min: None,
+                    illumination_max: None,
+                    illumination_softness: None,
                     file_path: None,
                     dirty: true,
                     revision: 0,
@@ -1149,6 +1152,8 @@ fn apply_undo(app: &mut AppState, set_id: CurveSetId) {
 fn invalidate_inspector_buffers(tab_ui: &mut crate::state::TabUiState) {
     tab_ui.noise_buf_for = None;
     tab_ui.sat_buf_for = None;
+    tab_ui.ill_buf_for = None;
+    tab_ui.set_ill_buf_for = None;
 }
 
 fn apply_redo(app: &mut AppState, set_id: CurveSetId) {
@@ -1165,12 +1170,16 @@ fn apply_redo(app: &mut AppState, set_id: CurveSetId) {
 }
 
 fn right_inspector(ui: &mut egui::Ui, app: &mut AppState, set_id: CurveSetId) {
+    ui.heading("Inspector");
+    set_level_window_fields(ui, app, set_id);
+
     let selected_curve = app
         .workspace
         .per_tab
         .get(&set_id)
         .and_then(|t| t.selected_curve);
     let Some(curve_id) = selected_curve else {
+        ui.separator();
         ui.label("Select a curve in the left rail to inspect it.");
         return;
     };
@@ -1180,7 +1189,7 @@ fn right_inspector(ui: &mut egui::Ui, app: &mut AppState, set_id: CurveSetId) {
         .map(|s| s.colorspace_curves.contains(&curve_id))
         .unwrap_or(false);
 
-    ui.heading("Inspector");
+    ui.separator();
     curve_name_field(ui, app, set_id, curve_id);
 
     ui.separator();
@@ -1193,6 +1202,9 @@ fn right_inspector(ui: &mut egui::Ui, app: &mut AppState, set_id: CurveSetId) {
 
     ui.separator();
     saturation_field(ui, app, set_id, curve_id);
+
+    ui.separator();
+    illumination_window_field(ui, app, set_id, curve_id);
 
     ui.separator();
     metadata_section(ui, app, set_id, curve_id);
@@ -1353,6 +1365,122 @@ fn parse_opt_keep_old(s: &str, old: Option<f64>) -> Option<f64> {
     }
 }
 
+/// Receptor operating window (§2.2) editing: min/max ambient irradiance
+/// (W/m²) and shoulder softness (decades). A receptor "sees" only the
+/// light its own sensitivity passes (E_i = ∫S·I dλ), so both bounds are
+/// in that per-receptor W/m² scale. Blank = no bound on that side; the
+/// set-level defaults (`set_level_window_fields`) then apply, and the
+/// effective window is shown beneath.
+fn illumination_window_field(
+    ui: &mut egui::Ui,
+    app: &mut AppState,
+    set_id: CurveSetId,
+    curve_id: u64,
+) {
+    let Some(set) = app.curve_sets.get_mut(&set_id) else {
+        return;
+    };
+    let (set_min, set_max) = (set.illumination_min, set.illumination_max);
+    let Some(tab_ui) = app.workspace.per_tab.get_mut(&set_id) else {
+        return;
+    };
+    let Some(curve) = set.curves.get_mut(&curve_id) else {
+        return;
+    };
+    if tab_ui.ill_buf_for != Some(curve_id) {
+        tab_ui.ill_min_buf = curve
+            .illumination_min
+            .map(|x| x.to_string())
+            .unwrap_or_default();
+        tab_ui.ill_max_buf = curve
+            .illumination_max
+            .map(|x| x.to_string())
+            .unwrap_or_default();
+        tab_ui.ill_soft_buf = curve
+            .illumination_softness
+            .map(|x| x.to_string())
+            .unwrap_or_default();
+        tab_ui.ill_buf_for = Some(curve_id);
+    }
+    ui.label("Operating window - ambient irradiance (W/m², as seen by this receptor) this receptor operates in:");
+    ui.label("Min (W/m²; blank = set default):");
+    ui.add(egui::TextEdit::singleline(&mut tab_ui.ill_min_buf).desired_width(80.0));
+    ui.label("Max (W/m²; blank = unbounded upward):");
+    ui.add(egui::TextEdit::singleline(&mut tab_ui.ill_max_buf).desired_width(80.0));
+    ui.label("Shoulder softness (decades; blank = default 0.5):");
+    ui.add(egui::TextEdit::singleline(&mut tab_ui.ill_soft_buf).desired_width(80.0));
+    let min = parse_opt_keep_old(&tab_ui.ill_min_buf, curve.illumination_min);
+    let max = parse_opt_keep_old(&tab_ui.ill_max_buf, curve.illumination_max);
+    let soft = parse_opt_keep_old(&tab_ui.ill_soft_buf, curve.illumination_softness);
+    if min != curve.illumination_min
+        || max != curve.illumination_max
+        || soft != curve.illumination_softness
+    {
+        curve.illumination_min = min;
+        curve.illumination_max = max;
+        curve.illumination_softness = soft;
+        set.revision += 1;
+        set.dirty = true;
+    }
+    let eff_min = curve.illumination_min.or(set_min);
+    let eff_max = curve.illumination_max.or(set_max);
+    let eff = match (eff_min, eff_max) {
+        (None, None) => "unbounded".to_string(),
+        (Some(lo), None) => format!("{lo} W/m² and up"),
+        (None, Some(hi)) => format!("up to {hi} W/m²"),
+        (Some(lo), Some(hi)) => format!("{lo}..{hi} W/m²"),
+    };
+    ui.small(format!("Effective window: {eff}"));
+}
+
+/// The whole system's operating-window defaults (§2.2), edited in one
+/// place and applied to every receptor without its own bound. Same units
+/// as the per-curve fields (W/m², decades). Undo-tracked like any other
+/// set edit.
+fn set_level_window_fields(ui: &mut egui::Ui, app: &mut AppState, set_id: CurveSetId) {
+    let Some(set) = app.curve_sets.get_mut(&set_id) else {
+        return;
+    };
+    let Some(tab_ui) = app.workspace.per_tab.get_mut(&set_id) else {
+        return;
+    };
+    if tab_ui.set_ill_buf_for != Some(set_id) {
+        tab_ui.set_ill_min_buf = set
+            .illumination_min
+            .map(|x| x.to_string())
+            .unwrap_or_default();
+        tab_ui.set_ill_max_buf = set
+            .illumination_max
+            .map(|x| x.to_string())
+            .unwrap_or_default();
+        tab_ui.set_ill_soft_buf = set
+            .illumination_softness
+            .map(|x| x.to_string())
+            .unwrap_or_default();
+        tab_ui.set_ill_buf_for = Some(set_id);
+    }
+    ui.label("System operating-window defaults (any receptor without its own bound uses these):");
+    ui.label("Default min (W/m²; blank = none):");
+    ui.add(egui::TextEdit::singleline(&mut tab_ui.set_ill_min_buf).desired_width(80.0));
+    ui.label("Default max (W/m²; blank = none):");
+    ui.add(egui::TextEdit::singleline(&mut tab_ui.set_ill_max_buf).desired_width(80.0));
+    ui.label("Default softness (decades; blank = default 0.5):");
+    ui.add(egui::TextEdit::singleline(&mut tab_ui.set_ill_soft_buf).desired_width(80.0));
+    let min = parse_opt_keep_old(&tab_ui.set_ill_min_buf, set.illumination_min);
+    let max = parse_opt_keep_old(&tab_ui.set_ill_max_buf, set.illumination_max);
+    let soft = parse_opt_keep_old(&tab_ui.set_ill_soft_buf, set.illumination_softness);
+    if min != set.illumination_min
+        || max != set.illumination_max
+        || soft != set.illumination_softness
+    {
+        set.illumination_min = min;
+        set.illumination_max = max;
+        set.illumination_softness = soft;
+        set.revision += 1;
+        set.dirty = true;
+    }
+}
+
 fn metadata_section(ui: &mut egui::Ui, app: &mut AppState, set_id: CurveSetId, curve_id: u64) {
     let Some(set) = app.curve_sets.get_mut(&set_id) else {
         return;
@@ -1393,6 +1521,12 @@ fn validation_flags(ui: &mut egui::Ui, app: &mut AppState, set_id: CurveSetId) {
     let Some(set) = app.curve_sets.get(&set_id) else {
         return;
     };
+    if set.has_invalid_illumination_window() {
+        ui.colored_label(
+            egui::Color32::from_rgb(220, 180, 40),
+            "⚠ A receptor operating window is malformed (min ≥ max, or a non-positive bound) and is being treated as unbounded.",
+        );
+    }
     if set.has_partial_eta_coverage() {
         ui.colored_label(
             egui::Color32::from_rgb(220, 180, 40),
