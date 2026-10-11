@@ -80,5 +80,17 @@ Write-Host "    repo        : $wslRepo"
 Write-Host "    target dir  : $TargetDir"
 Write-Host "    command     : wsl.exe $($wslArgv -join ' ') -e bash -lc `"$bashCmd`""
 
-& wsl.exe @wslArgv -e bash -lc $bashCmd
-exit $LASTEXITCODE
+# wsl.exe relays cargo's progress on stderr, and $ErrorActionPreference is
+# 'Stop' here: under Windows PowerShell that turns the first stderr line into
+# a terminating NativeCommandError and aborts the build. Relax the preference
+# around the call (exactly as package.ps1 does) and surface wsl.exe's real exit
+# code instead.
+$quiet = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'   # native stderr must not be fatal here
+$code = 1
+try {
+    & wsl.exe @wslArgv -e bash -lc $bashCmd
+    $code = $LASTEXITCODE
+}
+finally { $ErrorActionPreference = $quiet }
+exit $code

@@ -61,9 +61,11 @@ powershell -File scripts\package-linux.ps1 -Distro Ubuntu-26.04 -TargetDir /home
   that ship with Windows, so it runs as a single file.
 - **Windows (native `package.ps1`):** only cargo, plus `pandoc`/
   `wkhtmltopdf` if you want the PDF included (`-SkipPdf` skips both the PDF
-  and its tool checks). If `llvm-strip` is on PATH (`rustup component add
-  llvm-tools-preview`) the exe is stripped; otherwise it ships unstripped
-  with a warning. The zip is written with PowerShell's `Compress-Archive`.
+  and its tool checks). The exe is stripped with `llvm-strip`, taken from PATH
+  if present and otherwise from the active rustup toolchain's
+  `lib/rustlib/<host>/bin` (`rustup component add llvm-tools-preview`); if
+  neither is available it ships unstripped with a warning. The zip is written
+  with PowerShell's `Compress-Archive`.
   Without admin rights, install both tools portably: extract pandoc's
   `pandoc-<v>-windows-x86_64.zip` and wkhtmltopdf's
   `wkhtmltox-0.12.6-1.mxe-cross-win64.7z` into any user-writable folder and

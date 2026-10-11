@@ -12,10 +12,11 @@
   the user guide PDF; pass -SkipPdf if they are not installed). The PDF is
   rendered exactly like package.sh does, header included.
 
-  The exe is stripped with llvm-strip when one is on PATH (e.g. from `rustup
-  component add llvm-tools-preview`); an MSVC toolchain has no built-in strip,
-  so when neither llvm-strip nor strip exists the exe is shipped unstripped and
-  the script carries on with a warning.
+  The exe is stripped with llvm-strip: it is taken from PATH when present, and
+  otherwise from the active rustup toolchain (installed by `rustup component add
+  llvm-tools-preview`). An MSVC toolchain has no built-in strip, so when neither
+  llvm-strip nor strip can be found the exe is shipped unstripped and the script
+  carries on with a warning.
 
 .EXAMPLE
   scripts/package.ps1                # full package (build + PDF + zip)
@@ -125,6 +126,23 @@ try {
 
     $strip = Get-Command llvm-strip -ErrorAction SilentlyContinue
     if (-not $strip) { $strip = Get-Command strip -ErrorAction SilentlyContinue }
+    if (-not $strip) {
+        # `rustup component add llvm-tools-preview` installs llvm-strip under the
+        # active toolchain's lib/rustlib/<host>/bin, which rustup does NOT put on
+        # PATH. Look there before giving up. (`rustup which llvm-strip` fails:
+        # rustup only knows the toolchain's own bin/.) Guard the preference so a
+        # stray native stderr line can't abort the script under 'Stop'.
+        $ErrorActionPreference = 'Continue'
+        try {
+            $sysroot = & rustc --print sysroot 2>$null
+            $hostMatch = & rustc -vV 2>$null | Select-String '^host:\s*(\S+)'
+            if ($sysroot -and $hostMatch) {
+                $candidate = Join-Path $sysroot "lib\rustlib\$($hostMatch.Matches[0].Groups[1].Value)\bin\llvm-strip.exe"
+                if (Test-Path -LiteralPath $candidate) { $strip = Get-Command -Name $candidate }
+            }
+        }
+        finally { $ErrorActionPreference = $prevEap }
+    }
     if ($strip) {
         $ErrorActionPreference = 'Continue'
         try {
@@ -134,7 +152,7 @@ try {
         finally { $ErrorActionPreference = $prevEap }
         if ($stripCode -ne 0) { Write-Warning "strip exited $stripCode; keeping the exe unstripped" }
     } else {
-        Write-Warning "no llvm-strip/strip on PATH; ship the exe unstripped (rustup component add llvm-tools-preview)."
+        Write-Warning "no llvm-strip/strip found (PATH or active rustup toolchain); ship the exe unstripped (rustup component add llvm-tools-preview)."
     }
 
     if (-not $SkipPdf) {
