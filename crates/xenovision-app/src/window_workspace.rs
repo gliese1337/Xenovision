@@ -4,8 +4,13 @@
 //! block (add/rename/remove regimes, membership, per-regime luminance/
 //! opponent overrides, derived light-level band), all driven by the
 //! shared `AppState`.
+//!
+//! Workspace is a *container* kind (see `dock`): `ui` draws the container
+//! (its menu, Curve Set tab bar, and the active *in-container* set), while
+//! [`instance_ui`] draws a single Curve Set as a standalone instance when
+//! its tab has been popped out into its own OS window.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use eframe::egui;
 use xenovision_core::curve_set::{
@@ -13,9 +18,10 @@ use xenovision_core::curve_set::{
 };
 use xenovision_core::{fixture_library, natural_opponent, CurveType, QuantityKind, SpectralCurve};
 
+use crate::dock::{DockAction, PanelInstance};
 use crate::multi_curve_editor;
 use crate::plot_axis::{self, AxisOrientation};
-use crate::state::{AppCurveSet, AppRegime, AppState, CurveId, CurveSetId, NaturalSceneMode};
+use crate::state::{AppRegime, AppState, CurveId, CurveSetId, NaturalSceneMode};
 use crate::stimulus_picker;
 
 const STEP_NM: f64 = 1.0;
@@ -40,21 +46,49 @@ pub fn ui(ui: &mut egui::Ui, app: &mut AppState) {
     tab_bar(ui, app);
     ui.separator();
 
-    if app.workspace.open_tabs.is_empty() {
+    let Some(set_id) = active_in_container_set(app) else {
         ui.label("No Curve Sets open - use the \"+\" tab above to create one.");
         return;
-    }
-    app.workspace.active_tab = app
-        .workspace
-        .active_tab
-        .min(app.workspace.open_tabs.len() - 1);
-    let set_id = app.workspace.open_tabs[app.workspace.active_tab];
-
+    };
     tab_body(ui, app, set_id);
+    drive_undo(ui, app, set_id);
+}
 
-    // Drive this tab's undo/redo from every editing surface above
-    // uniformly (design doc §1.7) - one `observe` call per frame, after
-    // every widget had a chance to mutate the set.
+/// Renders a single Curve Set as a standalone instance (used when its tab is
+/// popped out into its own OS window): the editing body and its undo/redo
+/// drive, without the Workspace's own menu/tab bar.
+pub fn instance_ui(ui: &mut egui::Ui, app: &mut AppState, set_id: CurveSetId) {
+    if !app.curve_sets.contains_key(&set_id) {
+        ui.label("This Curve Set has been closed.");
+        return;
+    }
+    tab_body(ui, app, set_id);
+    drive_undo(ui, app, set_id);
+}
+
+/// The Curve Set the container should show: the active tab when it is
+/// in-container, otherwise the first in-container set. `None` when every set
+/// is popped out (the container is then hidden anyway).
+fn active_in_container_set(app: &AppState) -> Option<CurveSetId> {
+    let tabs = &app.workspace.open_tabs;
+    if tabs.is_empty() {
+        return None;
+    }
+    let floating = |set_id: CurveSetId| {
+        app.dock
+            .instance_is_floating(PanelInstance::Workspace(set_id))
+    };
+    let active = app.workspace.active_tab.min(tabs.len() - 1);
+    if !floating(tabs[active]) {
+        return Some(tabs[active]);
+    }
+    tabs.iter().copied().find(|&set_id| !floating(set_id))
+}
+
+/// Drives a Curve Set's undo/redo from every editing surface uniformly (design
+/// doc §1.7) - one `observe` call per frame, after every widget had a chance
+/// to mutate the set.
+fn drive_undo(ui: &mut egui::Ui, app: &mut AppState, set_id: CurveSetId) {
     let focused = ui.ctx().memory(|m| m.focused());
     if let (Some(set), Some(tab_ui)) = (
         app.curve_sets.get(&set_id),
@@ -70,7 +104,7 @@ fn menu_bar(ui: &mut egui::Ui, app: &mut AppState) {
         ui.menu_button("File", |ui| file_menu(ui, app));
         ui.menu_button("View", |ui| view_menu(ui, app));
         ui.menu_button("Window", |ui| {
-            crate::dock::window_menu(ui, &app.dock, &mut app.pending_dock_actions);
+            crate::window_menu(ui, app);
         });
     });
 }
@@ -100,14 +134,10 @@ fn view_menu(ui: &mut egui::Ui, app: &mut AppState) {
 }
 
 fn file_menu(ui: &mut egui::Ui, app: &mut AppState) {
-    if app.workspace.open_tabs.is_empty() {
+    let Some(set_id) = active_in_container_set(app) else {
         ui.label("(no tab open)");
         return;
-    }
-    let set_id = app.workspace.open_tabs[app
-        .workspace
-        .active_tab
-        .min(app.workspace.open_tabs.len() - 1)];
+    };
 
     if ui.button("Save").clicked() {
         if let Some(set) = app.curve_sets.get_mut(&set_id) {
@@ -236,24 +266,43 @@ fn restore_default_fixtures(app: &mut AppState) {
 }
 
 fn tab_bar(ui: &mut egui::Ui, app: &mut AppState) {
+    // The tab highlighted in the container is the *in-container* active set
+    // (its selected set may itself be popped out into its own window).
+    let active_in_container = active_in_container_set(app);
     ui.horizontal_wrapped(|ui| {
         for i in 0..app.workspace.open_tabs.len() {
             let set_id = app.workspace.open_tabs[i];
+            if app
+                .dock
+                .instance_is_floating(PanelInstance::Workspace(set_id))
+            {
+                continue;
+            }
             let name = app
                 .curve_sets
                 .get(&set_id)
                 .map(|s| s.name.clone())
                 .unwrap_or_else(|| "?".to_string());
-            // Label and × go straight into the wrapping row, not into a
+            // Label and buttons go straight into the wrapping row, not into a
             // nested `ui.horizontal`: a wrapping layout can only wrap
             // individual widgets, so nested groups made the whole tab row
             // one unbreakable line, forcing the Workspace far wider than
             // the window.
+            crate::dragged_tab(
+                ui,
+                app,
+                crate::dock::DragTabSource::Instance(PanelInstance::Workspace(set_id)),
+                name,
+                active_in_container == Some(set_id),
+                |app| app.workspace.active_tab = i,
+            );
             if ui
-                .selectable_label(app.workspace.active_tab == i, name)
+                .small_button("⇱")
+                .on_hover_text("Pop out into its own window")
                 .clicked()
             {
-                app.workspace.active_tab = i;
+                app.pending_dock_actions
+                    .push(DockAction::FloatInstance(PanelInstance::Workspace(set_id)));
             }
             if ui.small_button("×").clicked() {
                 request_close_tab(app, set_id);
@@ -267,29 +316,7 @@ fn tab_bar(ui: &mut egui::Ui, app: &mut AppState) {
             .clicked()
         {
             let name = app.workspace.new_tab_name_buf.trim().to_string();
-            let id = app.alloc_id();
-            app.curve_sets.insert(
-                id,
-                AppCurveSet {
-                    id,
-                    name,
-                    curve_order: Vec::new(),
-                    curves: HashMap::new(),
-                    regimes: Vec::new(),
-                    metadata: BTreeMap::new(),
-                    illumination_min: None,
-                    illumination_max: None,
-                    illumination_softness: None,
-                    file_path: None,
-                    dirty: true,
-                    revision: 0,
-                },
-            );
-            app.workspace
-                .per_tab
-                .insert(id, crate::state::TabUiState::default());
-            app.workspace.open_tabs.push(id);
-            app.workspace.active_tab = app.workspace.open_tabs.len() - 1;
+            app.add_curve_set(name);
             app.workspace.new_tab_name_buf.clear();
         }
     });
@@ -314,22 +341,9 @@ fn request_close_tab(app: &mut AppState, set_id: CurveSetId) {
 
 /// Actually removes the tab and its `CurveSet` - unlike closing the
 /// Comparison/Stimulus Editor *windows*, this really does discard the
-/// data (hence the unsaved-changes warning before getting here), and
-/// also drops it from Comparison's species selection if it was checked
-/// there, so that doesn't dangle.
+/// data (hence the unsaved-changes warning before getting here).
 fn close_tab(app: &mut AppState, set_id: CurveSetId) {
-    app.curve_sets.remove(&set_id);
-    app.workspace.per_tab.remove(&set_id);
-    if let Some(idx) = app.workspace.open_tabs.iter().position(|&id| id == set_id) {
-        app.workspace.open_tabs.remove(idx);
-        if idx < app.workspace.active_tab {
-            app.workspace.active_tab -= 1;
-        }
-    }
-    app.prune_comparison_species(set_id);
-    if app.workspace.pending_close == Some(set_id) {
-        app.workspace.pending_close = None;
-    }
+    app.close_curve_set(set_id);
 }
 
 /// An inline modal (egui has no blocking native dialog) asking whether
@@ -339,6 +353,14 @@ fn close_tab_confirmation(ui: &mut egui::Ui, app: &mut AppState) {
     let Some(set_id) = app.workspace.pending_close else {
         return;
     };
+    // A popped-out set owns its prompt in its own window; and a dirty one is
+    // brought back into the container by `close_instance` before this is set.
+    if app
+        .dock
+        .instance_is_floating(PanelInstance::Workspace(set_id))
+    {
+        return;
+    }
     let name = app
         .curve_sets
         .get(&set_id)

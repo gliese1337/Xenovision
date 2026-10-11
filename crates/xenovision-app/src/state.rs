@@ -20,15 +20,18 @@
 //!   explicitly allows either, and reusing proven logic is lower-risk.
 //! - `comparison`/`stimulus_editor` are always-present structs rather than
 //!   `Option<...>`: they hold the *parked* (most recently closed) state of
-//!   each repeatable panel, which is what a new window inherits when no other
-//!   window of that kind is open, and which other panels read as app-wide
+//!   each repeatable panel, which is what a new instance inherits when no other
+//!   instance of that kind is open, and which other panels read as app-wide
 //!   defaults. Every open instance - of Comparison, Stimulus Editor and Image
-//!   Display alike - lives in a per-panel map keyed by `PanelId`, and the
-//!   window modules never need to know which instance they are drawing: the
+//!   Display alike - lives in a per-panel map keyed by `PanelId`, ordered into
+//!   each kind's container by `AppState::repeatable_tabs`, and the window
+//!   modules never need to know which instance they are drawing: the
 //!   instance's state is swapped into the `comparison`/`stimulus_editor` field
 //!   for the duration of that instance's draw (see
-//!   `AppState::with_comparison`). Closing a panel *parks* its state (last
-//!   closed wins) instead of discarding it.
+//!   `AppState::with_comparison`). Closing an instance *parks* its state (last
+//!   closed wins) instead of discarding it; Workspace's Curve Set instances are
+//!   the exception - closing one discards it (after an unsaved-changes prompt),
+//!   since Curve Sets are shared data.
 //! - `DistanceMetric` is reused directly from `xenovision_core::comparison`
 //!   rather than redefined.
 //!
@@ -52,7 +55,7 @@ use xenovision_core::{
     fixture_library, fixtures, CurveSet as CoreCurveSet, CurveType, QuantityKind, SpectralCurve,
 };
 
-use crate::dock::{DockAction, DockLayout, PanelId, PanelKind, Placement};
+use crate::dock::{DockAction, DockLayout, DragTabState, PanelId, PanelInstance, PanelKind};
 use crate::image_library::ImageLibrary;
 use crate::plot_axis::AxisOrientation;
 use crate::undo::UndoManager;
@@ -375,6 +378,17 @@ impl Default for TabUiState {
     }
 }
 
+/// Instance-tab order and active tab for one repeatable [`PanelKind`] (the
+/// Workspace's equivalent is [`WorkspaceState::open_tabs`]/`active_tab`).
+/// `order` lists *every* live instance of the kind, including instances
+/// popped out into their own OS windows; the in-container tabs are those not
+/// in [`DockLayout::floating_instances`].
+#[derive(Default)]
+pub struct ContainerTabs {
+    pub order: Vec<PanelId>,
+    pub active: Option<PanelId>,
+}
+
 /// Workspace window state (design doc §4.3).
 pub struct WorkspaceState {
     pub open_tabs: Vec<CurveSetId>,
@@ -573,10 +587,11 @@ pub struct AppState {
     /// Loaded image cubes, shared by the Stimulus Editor (curve extraction)
     /// and every Image Display panel (receptor renderings).
     pub image_library: ImageLibrary,
-    /// One state per open Image Display panel, keyed by its [`PanelId`].
-    /// Image Display is repeatable (`PanelKind::is_multi_instance`), so several
-    /// independent panels - each with its own view list - can be open at once,
-    /// all reading the one shared `image_library`.
+    /// One state per open Image Display instance, keyed by its [`PanelId`].
+    /// Image Display is a repeatable kind, so several independent instances -
+    /// each with its own view list - can be open at once as in-container tabs
+    /// and/or popped out into their own OS windows, all reading the one shared
+    /// `image_library`.
     pub image_displays: HashMap<PanelId, ImageDisplayState>,
     /// The *parked*, most-recently-closed Image Display state, inherited by a
     /// newly opened panel when none other is open. Unlike the other repeatable
@@ -590,6 +605,10 @@ pub struct AppState {
     /// doesn't retry every frame).
     pub gpu: Option<Arc<xenovision_core::gpu::GpuContext>>,
     pub gpu_attempted: bool,
+    /// Per-kind instance-tab order and active tab for Comparison, Stimulus
+    /// Editor and Image Display. Workspace's equivalent lives in
+    /// [`AppState::workspace`] (its instances are Curve Sets).
+    pub repeatable_tabs: HashMap<PanelKind, ContainerTabs>,
     /// Which panels are docked as tabs in the main window, floating in
     /// their own windows, or hidden.
     pub dock: DockLayout,
@@ -597,6 +616,9 @@ pub struct AppState {
     /// Window menu), applied by `main` after the frame's UI has run so
     /// the layout never changes mid-render.
     pub pending_dock_actions: Vec<DockAction>,
+    /// The in-progress tab drag gesture (tear-off or drag-in), if any; see
+    /// `dock::DragTabState`.
+    pub drag_tab: Option<DragTabState>,
     pub transform_cache: TransformCache,
     pub luminants: HashMap<CurveId, SpectralCurve>,
     pub luminant_order: Vec<CurveId>,
@@ -623,34 +645,37 @@ impl AppState {
         first
     }
 
-    /// The lowest instance number of `kind` not currently open (docked or
-    /// floating), so the first panel of a kind is always instance `0` - titled
-    /// "Comparison", "Image Display", … - and its repeats are numbered
-    /// deterministically.
+    /// The lowest instance number of `kind` not currently live (in a
+    /// container or popped out), so the first panel of a kind is always
+    /// instance `0` - titled "Comparison", "Image Display", … - and its
+    /// repeats are numbered deterministically.
     fn next_free_instance(&self, kind: PanelKind) -> u32 {
         let used: std::collections::HashSet<u32> = self
-            .dock
-            .panels_of_kind(kind)
-            .into_iter()
-            .map(|id| id.instance)
-            .collect();
+            .repeatable_tabs
+            .get(&kind)
+            .map(|tabs| tabs.order.iter().map(|id| id.instance).collect())
+            .unwrap_or_default();
         (0u32..)
             .find(|i| !used.contains(i))
             .expect("u32 instance space")
     }
 
-    /// Allocates a fresh instance of a repeatable panel kind and places it
-    /// (docked or floating); returns its id. The new panel inherits its kind's
-    /// *parked* state - the most recently closed panel of that kind, see
-    /// [`AppState::prune_detached_panels`] - when no other panel of that kind
-    /// is open; otherwise it starts blank. Comparison panels default their
+    /// Allocates a fresh instance of a repeatable panel kind and adds it to
+    /// that kind's tab order (in-container, or popped out when `floating`).
+    /// The new panel inherits its kind's *parked* state - the most recently
+    /// closed panel of that kind - when no other instance of that kind is
+    /// open; otherwise it starts blank. Comparison panels default their
     /// reference luminant to the first luminant in the library.
     pub fn new_panel(&mut self, kind: PanelKind, floating: bool) -> PanelId {
         debug_assert!(
-            kind.is_multi_instance(),
-            "only repeatable panels can be opened as a new instance"
+            !kind.instances_are_curve_sets(),
+            "Workspace instances are Curve Sets; use add_curve_set"
         );
-        let others_open = !self.dock.panels_of_kind(kind).is_empty();
+        let others_open = self
+            .repeatable_tabs
+            .get(&kind)
+            .map(|tabs| !tabs.order.is_empty())
+            .unwrap_or(false);
         let id = PanelId::new(kind, self.next_free_instance(kind));
         match kind {
             PanelKind::Comparison => {
@@ -678,34 +703,89 @@ impl AppState {
                 };
                 self.image_displays.insert(id, state);
             }
-            PanelKind::Workspace => unreachable!("Workspace is not repeatable"),
+            PanelKind::Workspace => unreachable!("Workspace instances are Curve Sets"),
         }
-        self.dispatch_dock_action(if floating {
-            DockAction::OpenFloating(id)
+        let tabs = self.repeatable_tabs.entry(kind).or_default();
+        tabs.order.push(id);
+        tabs.active = Some(id);
+        if floating {
+            self.dock
+                .apply(DockAction::FloatInstance(PanelInstance::Panel(id)));
         } else {
-            DockAction::OpenDocked(id)
-        });
+            self.dock.active = Some(kind);
+        }
+        self.reconcile_containers();
         id
     }
 
-    /// Creates a fresh, empty Image Display panel and places it (docked or
-    /// floating), returning its id.
+    /// Creates a fresh, empty Image Display panel and adds it to the kind's
+    /// tab order (in-container, or popped out when `floating`).
     pub fn new_image_display(&mut self, floating: bool) -> PanelId {
         self.new_panel(PanelKind::ImageDisplay, floating)
     }
 
     /// The Image Display panel a new view should go to: the first one already
-    /// open, or a newly created docked one if none is open.
+    /// open, or a newly created in-container one if none is open.
     pub fn primary_image_display(&mut self) -> PanelId {
         if let Some(id) = self
-            .dock
-            .panels_of_kind(PanelKind::ImageDisplay)
-            .first()
-            .copied()
+            .repeatable_tabs
+            .get(&PanelKind::ImageDisplay)
+            .and_then(|tabs| tabs.order.first().copied())
         {
             return id;
         }
         self.new_image_display(false)
+    }
+
+    /// Adds a new blank Curve Set as a Workspace instance (in-container) and
+    /// returns its id.
+    pub fn add_curve_set(&mut self, name: String) -> CurveSetId {
+        let id = self.alloc_id();
+        self.curve_sets.insert(
+            id,
+            AppCurveSet {
+                id,
+                name,
+                curve_order: Vec::new(),
+                curves: HashMap::new(),
+                regimes: Vec::new(),
+                metadata: BTreeMap::new(),
+                illumination_min: None,
+                illumination_max: None,
+                illumination_softness: None,
+                file_path: None,
+                dirty: true,
+                revision: 0,
+            },
+        );
+        self.workspace.per_tab.insert(id, TabUiState::default());
+        self.workspace.open_tabs.push(id);
+        self.workspace.active_tab = self.workspace.open_tabs.len() - 1;
+        self.reconcile_containers();
+        id
+    }
+
+    /// Removes a Curve Set and its per-tab UI state for good (the caller is
+    /// responsible for any unsaved-changes prompt - unlike a repeatable
+    /// panel, a closed Curve Set is discarded, not parked). Also drops it from
+    /// Comparison's species selection so that doesn't dangle.
+    pub fn close_curve_set(&mut self, set_id: CurveSetId) {
+        self.curve_sets.remove(&set_id);
+        self.workspace.per_tab.remove(&set_id);
+        if let Some(idx) = self.workspace.open_tabs.iter().position(|&id| id == set_id) {
+            self.workspace.open_tabs.remove(idx);
+            if idx < self.workspace.active_tab {
+                self.workspace.active_tab -= 1;
+            }
+        }
+        self.dock
+            .floating_instances
+            .retain(|&i| i != PanelInstance::Workspace(set_id));
+        self.prune_comparison_species(set_id);
+        if self.workspace.pending_close == Some(set_id) {
+            self.workspace.pending_close = None;
+        }
+        self.reconcile_containers();
     }
 
     /// Runs `f` with the Comparison instance `id` installed as
@@ -734,72 +814,195 @@ impl AppState {
         result
     }
 
+    /// Every live instance of `kind`, in tab order (including instances popped
+    /// out into their own OS windows).
+    pub fn live_instances(&self, kind: PanelKind) -> Vec<PanelInstance> {
+        if kind.instances_are_curve_sets() {
+            self.workspace
+                .open_tabs
+                .iter()
+                .map(|&set_id| PanelInstance::Workspace(set_id))
+                .collect()
+        } else {
+            self.repeatable_tabs
+                .get(&kind)
+                .map(|tabs| {
+                    tabs.order
+                        .iter()
+                        .map(|&id| PanelInstance::Panel(id))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    }
+
+    /// The selected instance of `kind`, if any.
+    pub fn active_instance(&self, kind: PanelKind) -> Option<PanelInstance> {
+        if kind.instances_are_curve_sets() {
+            self.workspace
+                .open_tabs
+                .get(self.workspace.active_tab)
+                .map(|&set_id| PanelInstance::Workspace(set_id))
+        } else {
+            self.repeatable_tabs
+                .get(&kind)
+                .and_then(|tabs| tabs.active)
+                .map(PanelInstance::Panel)
+        }
+    }
+
+    /// Selects an instance tab.
+    pub fn set_active_instance(&mut self, inst: PanelInstance) {
+        match inst {
+            PanelInstance::Workspace(set_id) => {
+                if let Some(idx) = self.workspace.open_tabs.iter().position(|&s| s == set_id) {
+                    self.workspace.active_tab = idx;
+                }
+            }
+            PanelInstance::Panel(id) => {
+                if let Some(tabs) = self.repeatable_tabs.get_mut(&id.kind) {
+                    tabs.active = Some(id);
+                }
+            }
+        }
+    }
+
+    /// The display title of an instance tab/window (a Curve Set's name, or the
+    /// numbered panel title).
+    pub fn instance_title(&self, inst: PanelInstance) -> String {
+        match inst {
+            PanelInstance::Workspace(set_id) => self
+                .curve_sets
+                .get(&set_id)
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| "(closed)".to_string()),
+            PanelInstance::Panel(id) => id.title(),
+        }
+    }
+
     /// Applies a dock action and keeps per-panel state consistent with the
-    /// layout: `NewInstance` allocates that panel's data, and closing a
-    /// repeatable panel parks its state for the next window of that kind.
+    /// layout: `NewInstance` allocates that panel's data, `CloseInstance`
+    /// parks a repeatable panel (or discards a Curve Set), and the container
+    /// tab strip is reconciled to whatever instances remain in-container.
     pub fn dispatch_dock_action(&mut self, action: DockAction) {
         match action {
             DockAction::NewInstance(kind) => {
-                debug_assert!(
-                    kind.is_multi_instance(),
-                    "only repeatable panels can open another instance"
-                );
-                self.new_panel(kind, true);
+                self.new_panel(kind, false);
+                return;
             }
+            DockAction::ActivateInstance(inst) => self.set_active_instance(inst),
+            DockAction::CloseInstance(inst) => self.close_instance(inst),
             other => self.dock.apply(other),
         }
-        self.prune_detached_panels();
+        self.reconcile_containers();
     }
 
-    /// Handles a floating window's OS close button, then parks any panel state
-    /// that leaves behind.
-    pub fn dismiss_floating(&mut self, id: PanelId) {
-        self.dock.floating_window_closed(id);
-        self.prune_detached_panels();
-    }
-
-    /// Parks the state of repeatable panels that are no longer docked or
-    /// floating (i.e. were closed) into its kind's parked slot, from which the
-    /// next window of that kind inherits it (last closed wins). Any earlier
-    /// parked state is dropped - for Image Display that releases its idle
-    /// render worker.
-    fn prune_detached_panels(&mut self) {
-        let hidden: Vec<PanelId> = self
-            .comparisons
-            .keys()
-            .chain(self.stimulus_editors.keys())
-            .chain(self.image_displays.keys())
-            .filter(|id| self.dock.placement(**id) == Placement::Hidden)
-            .copied()
-            .collect();
-        for id in hidden {
-            match id.kind {
-                PanelKind::Comparison => {
-                    if let Some(state) = self.comparisons.remove(&id) {
-                        self.comparison = state;
+    /// Removes an instance. A repeatable panel's state is *parked* (last closed
+    /// wins, inherited by the next instance of that kind); a Workspace Curve
+    /// Set is discarded, so a dirty one is instead brought back into its
+    /// container and parked in `pending_close` for the unsaved-changes prompt.
+    fn close_instance(&mut self, inst: PanelInstance) {
+        match inst {
+            PanelInstance::Workspace(set_id) => {
+                let dirty = self
+                    .curve_sets
+                    .get(&set_id)
+                    .map(|s| s.dirty)
+                    .unwrap_or(false);
+                if dirty {
+                    self.dock.floating_instances.retain(|&i| i != inst);
+                    self.workspace.pending_close = Some(set_id);
+                    self.reconcile_containers();
+                    // Bring the Workspace container forward so the
+                    // unsaved-changes prompt is actually visible.
+                    self.dock.active = Some(PanelKind::Workspace);
+                } else {
+                    self.close_curve_set(set_id);
+                }
+            }
+            PanelInstance::Panel(id) => {
+                if let Some(tabs) = self.repeatable_tabs.get_mut(&id.kind) {
+                    if let Some(pos) = tabs.order.iter().position(|&x| x == id) {
+                        tabs.order.remove(pos);
+                        if tabs.active == Some(id) {
+                            tabs.active = tabs
+                                .order
+                                .get(pos.saturating_sub(1))
+                                .or_else(|| tabs.order.get(pos))
+                                .copied();
+                        }
                     }
                 }
-                PanelKind::StimulusEditor => {
-                    if let Some(state) = self.stimulus_editors.remove(&id) {
-                        self.stimulus_editor = state;
+                self.dock.floating_instances.retain(|&i| i != inst);
+                match id.kind {
+                    PanelKind::Comparison => {
+                        if let Some(state) = self.comparisons.remove(&id) {
+                            self.comparison = state;
+                        }
                     }
-                }
-                PanelKind::ImageDisplay => {
-                    if let Some(state) = self.image_displays.remove(&id) {
-                        self.remembered_image_display = Some(state);
+                    PanelKind::StimulusEditor => {
+                        if let Some(state) = self.stimulus_editors.remove(&id) {
+                            self.stimulus_editor = state;
+                        }
                     }
+                    PanelKind::ImageDisplay => {
+                        if let Some(state) = self.image_displays.remove(&id) {
+                            self.remembered_image_display = Some(state);
+                        }
+                    }
+                    PanelKind::Workspace => {}
                 }
-                PanelKind::Workspace => {}
+                self.reconcile_containers();
             }
         }
+    }
+
+    /// Whether `kind` still has at least one instance shown *inside* its
+    /// container (not popped out). A container tab exists only while this
+    /// holds.
+    fn container_has_in_container(&self, kind: PanelKind) -> bool {
+        if kind.instances_are_curve_sets() {
+            self.workspace.open_tabs.iter().any(|&set_id| {
+                !self
+                    .dock
+                    .instance_is_floating(PanelInstance::Workspace(set_id))
+            })
+        } else {
+            self.repeatable_tabs
+                .get(&kind)
+                .map(|tabs| {
+                    tabs.order
+                        .iter()
+                        .any(|&id| !self.dock.instance_is_floating(PanelInstance::Panel(id)))
+                })
+                .unwrap_or(false)
+        }
+    }
+
+    /// Adds/removes kind container tabs so exactly the kinds with an
+    /// in-container instance are shown, and keeps `dock.active` valid. Call
+    /// after any change to instance order or instance placement.
+    fn reconcile_containers(&mut self) {
+        for kind in PanelKind::ALL {
+            if self.container_has_in_container(kind) {
+                if !self.dock.docked.contains(&kind)
+                    && !self.dock.floating_containers.contains(&kind)
+                {
+                    self.dock.docked.push(kind);
+                }
+            } else {
+                self.dock.docked.retain(|&k| k != kind);
+                self.dock.floating_containers.retain(|&k| k != kind);
+            }
+        }
+        self.dock.fix_active();
     }
 
     /// Removes `set_id` from every Comparison's species selection and
     /// per-species regime memory - the parked state and every open instance -
     /// so no panel keeps a dangling reference when a visual system is deleted.
     pub fn prune_comparison_species(&mut self, set_id: CurveSetId) {
-        for comparison in std::iter::once(&mut self.comparison)
-            .chain(self.comparisons.values_mut())
+        for comparison in std::iter::once(&mut self.comparison).chain(self.comparisons.values_mut())
         {
             comparison.selected_species.retain(|&id| id != set_id);
             comparison.active_regime.remove(&set_id);
@@ -809,8 +1012,7 @@ impl AppState {
     /// Clears every Comparison's remembered active regime for `set_id`, for
     /// when a set's regimes change under the panels' feet.
     pub fn prune_comparison_active_regime(&mut self, set_id: CurveSetId) {
-        for comparison in std::iter::once(&mut self.comparison)
-            .chain(self.comparisons.values_mut())
+        for comparison in std::iter::once(&mut self.comparison).chain(self.comparisons.values_mut())
         {
             comparison.active_regime.remove(&set_id);
         }
@@ -819,13 +1021,12 @@ impl AppState {
     /// Drops a stimulus curve from every Comparison selection and every
     /// Stimulus Editor's selection/pending-unload, for when it is unloaded.
     pub fn forget_stimulus(&mut self, id: CurveId) {
-        for comparison in std::iter::once(&mut self.comparison)
-            .chain(self.comparisons.values_mut())
+        for comparison in std::iter::once(&mut self.comparison).chain(self.comparisons.values_mut())
         {
             comparison.selected_stimuli.retain(|&i| i != id);
         }
-        for editor in std::iter::once(&mut self.stimulus_editor)
-            .chain(self.stimulus_editors.values_mut())
+        for editor in
+            std::iter::once(&mut self.stimulus_editor).chain(self.stimulus_editors.values_mut())
         {
             if editor.selected == Some(id) {
                 editor.selected = None;
@@ -901,7 +1102,7 @@ impl AppState {
             );
         }
 
-        AppState {
+        let mut state = AppState {
             next_id,
             curve_sets,
             workspace: WorkspaceState {
@@ -922,12 +1123,16 @@ impl AppState {
             remembered_image_display: None,
             gpu: None,
             gpu_attempted: false,
+            repeatable_tabs: HashMap::new(),
             dock: DockLayout::default(),
             pending_dock_actions: Vec::new(),
+            drag_tab: None,
             transform_cache: TransformCache::default(),
             luminants,
             luminant_order,
             axis_orientation: AxisOrientation::default(),
-        }
+        };
+        state.reconcile_containers();
+        state
     }
 }

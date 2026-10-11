@@ -30,7 +30,7 @@ use xenovision_core::hyperspectral::{HyperspectralCube, Region};
 use xenovision_core::{ChannelStage, InputKind, ReceptorImage, ReceptorKernel, SpectralCurve};
 
 use crate::colormap::{self, Colormap};
-use crate::dock::{DockAction, PanelId};
+use crate::dock::{DockAction, PanelId, PanelInstance, PanelKind};
 use crate::image_library::{self, region_label, ImageLibrary, ImageSource, ImageSourceId};
 use crate::region_selector::{region_selector, RegionDraft};
 use crate::render_worker::{RenderEngine, RenderJob, RenderOutcome, RenderProduct};
@@ -216,9 +216,15 @@ pub fn seed_from_editor(app: &mut AppState) {
     let source = app.image_library.selected_id();
     let region = app.stimulus_editor.selection.region.clone();
     seed_view(app, panel, source, region);
-    // Bring the panel forward when it is docked (a floating one is already
-    // visible, and `Activate` is a no-op for it).
-    app.pending_dock_actions.push(DockAction::Activate(panel));
+    // Bring the panel forward: select the instance and, when it is in its
+    // container, activate the Image Display container tab (a popped-out one is
+    // already visible).
+    let inst = PanelInstance::Panel(panel);
+    app.set_active_instance(inst);
+    if !app.dock.instance_is_floating(inst) {
+        app.pending_dock_actions
+            .push(DockAction::ActivateContainer(PanelKind::ImageDisplay));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1841,7 +1847,7 @@ mod tests {
         assert_eq!(app.image_library.sources.len(), 1);
 
         // Closing b drops only b's state (and its render worker).
-        app.dispatch_dock_action(DockAction::Close(b));
+        app.dispatch_dock_action(DockAction::CloseInstance(PanelInstance::Panel(b)));
         assert!(app.image_displays.contains_key(&a));
         assert!(!app.image_displays.contains_key(&b));
         assert_eq!(app.image_displays[&a].views.len(), 1);
@@ -1879,8 +1885,8 @@ mod tests {
 
         // Close b, then a: a is now the last-closed, so the next window
         // inherits a's two views.
-        app.dispatch_dock_action(DockAction::Close(b));
-        app.dispatch_dock_action(DockAction::Close(a));
+        app.dispatch_dock_action(DockAction::CloseInstance(PanelInstance::Panel(b)));
+        app.dispatch_dock_action(DockAction::CloseInstance(PanelInstance::Panel(a)));
         let c = app.new_image_display(false);
         assert_eq!(
             app.image_displays[&c].views.len(),
