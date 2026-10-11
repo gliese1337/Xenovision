@@ -3,9 +3,13 @@
 //! `fixtures` subdirectory of the app's per-user data directory
 //! (`preset_store::data_dir()`) - not one combined array, so a fixture
 //! can be added, hand-edited, or deleted independently of the rest.
-//! Bootstrapped from `fixtures::builtin_fixtures()` on first run, with
-//! `restore_builtin_defaults` as the recovery mechanism if a built-in
-//! file gets corrupted or deleted.
+//! Bootstrapped from `fixtures::builtin_fixtures()` on first run. On every
+//! load the built-ins are also *reconciled* against the shipped
+//! definitions: a built-in file the user has never edited is refreshed
+//! when the shipped definition has moved on, while edited files and
+//! custom fixtures are left alone. `restore_builtin_defaults` remains the
+//! explicit recovery mechanism if a built-in file gets corrupted or
+//! deleted.
 
 use std::path::{Path, PathBuf};
 
@@ -43,6 +47,49 @@ fn file_path_for(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{}.json", slug(name)))
 }
 
+/// Metadata key stamped into every file the app writes from a built-in
+/// definition: the content hash of that definition *excluding this key*.
+/// It lets reconciliation tell an unedited built-in snapshot (marker
+/// present and matching) from user content (marker absent or mismatched,
+/// or a name that isn't a built-in) - only the former is ever refreshed
+/// to a newer shipped definition.
+const BUILTIN_HASH_KEY: &str = "builtin_hash";
+
+/// Stable 64-bit FNV-1a hash of a fixture's canonical JSON with the
+/// built-in marker removed. Unlike `DefaultHasher` this is stable across
+/// releases, so a marker written by an earlier build still validates.
+fn content_hash(set: &CurveSet) -> u64 {
+    let mut probe = set.clone();
+    probe.metadata.remove(BUILTIN_HASH_KEY);
+    let json = serde_json::to_string(&probe).expect("CurveSet is always serializable");
+    json.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// The marker string for `set`'s current content.
+fn builtin_marker(set: &CurveSet) -> String {
+    format!("{:016x}", content_hash(set))
+}
+
+/// A built-in fixture as written to disk: `set` with its content marker
+/// stamped into the metadata.
+fn stamped_builtin(set: &CurveSet) -> CurveSet {
+    let mut out = set.clone();
+    out.metadata
+        .insert(BUILTIN_HASH_KEY.to_string(), builtin_marker(set));
+    out
+}
+
+/// Whether `set`, as loaded from disk, is an unedited snapshot of some
+/// built-in definition (its marker is present and still matches its own
+/// content). User edits break the match and are therefore preserved.
+fn is_unedited_builtin(set: &CurveSet) -> bool {
+    set.metadata
+        .get(BUILTIN_HASH_KEY)
+        .is_some_and(|stored| *stored == builtin_marker(set))
+}
+
 fn read_all(dir: &Path) -> Vec<CurveSet> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -65,20 +112,37 @@ fn write_fixture_in(dir: &Path, set: &CurveSet) -> std::io::Result<()> {
     std::fs::write(path, json)
 }
 
+/// Refreshes any present built-in file that is still an unedited snapshot
+/// of a *previous* shipped definition, leaving user-edited and custom
+/// files untouched. A built-in the user deleted stays deleted.
+fn reconcile_builtins_in(dir: &Path, sets: &mut [CurveSet]) {
+    for builtin in builtin_fixtures() {
+        let Some(disk) = sets.iter_mut().find(|s| s.name == builtin.name) else {
+            continue;
+        };
+        if is_unedited_builtin(disk) && content_hash(disk) != content_hash(&builtin) {
+            *disk = stamped_builtin(&builtin);
+            let _ = write_fixture_in(dir, disk);
+        }
+    }
+}
+
 fn load_library_from(dir: &Path) -> Vec<CurveSet> {
-    let sets = read_all(dir);
-    if !sets.is_empty() {
-        return sets;
+    let mut sets = read_all(dir);
+    if sets.is_empty() {
+        // First run (empty/missing directory): extract every built-in.
+        for set in builtin_fixtures() {
+            let _ = write_fixture_in(dir, &stamped_builtin(&set));
+        }
+        return read_all(dir);
     }
-    for set in builtin_fixtures() {
-        let _ = write_fixture_in(dir, &set);
-    }
-    read_all(dir)
+    reconcile_builtins_in(dir, &mut sets);
+    sets
 }
 
 fn restore_builtin_defaults_in(dir: &Path) -> Vec<CurveSet> {
     for set in builtin_fixtures() {
-        let _ = write_fixture_in(dir, &set);
+        let _ = write_fixture_in(dir, &stamped_builtin(&set));
     }
     read_all(dir)
 }
@@ -257,6 +321,110 @@ mod tests {
         // Deleting an already-absent fixture is not an error.
         delete_fixture_in(&dir, "Deletable System").unwrap();
 
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn bootstrapped_builtins_are_stamped_and_idempotent() {
+        let dir = scratch_dir("stamp");
+        let loaded = load_library_from(&dir);
+        assert_eq!(loaded.len(), 11);
+        assert!(
+            loaded.iter().all(is_unedited_builtin),
+            "every bootstrapped built-in must carry a matching marker"
+        );
+        assert_eq!(
+            load_library_from(&dir),
+            loaded,
+            "a second load with unchanged built-ins is a no-op"
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn unedited_builtin_is_refreshed_when_the_shipped_definition_changes() {
+        let dir = scratch_dir("refresh");
+
+        // A previous release's built-in: the real fixture with one extra
+        // field, stamped so it reads as a genuine unedited snapshot.
+        let mut old_human = crate::fixtures::human();
+        old_human
+            .metadata
+            .insert("era".to_string(), "previous".to_string());
+        write_fixture_in(&dir, &stamped_builtin(&old_human)).unwrap();
+        // A custom fixture must survive untouched.
+        write_fixture_in(&dir, &CurveSet::new("My Custom System")).unwrap();
+
+        let loaded = load_library_from(&dir);
+        let human = loaded
+            .iter()
+            .find(|s| s.name == "Human (Homo sapiens)")
+            .unwrap();
+        assert!(
+            !human.metadata.contains_key("era"),
+            "an unedited built-in must be refreshed to the shipped definition"
+        );
+        assert!(
+            loaded.iter().any(|s| s.name == "My Custom System"),
+            "custom fixtures must survive reconciliation"
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn edited_or_tampered_builtin_is_preserved() {
+        // An unmarked file (as a user save would leave it) ...
+        let dir = scratch_dir("preserve-unmarked");
+        let mut edited = crate::fixtures::human();
+        edited
+            .metadata
+            .insert("user_edit".to_string(), "keep me".to_string());
+        write_fixture_in(&dir, &edited).unwrap();
+        let loaded = load_library_from(&dir);
+        let human = loaded
+            .iter()
+            .find(|s| s.name == "Human (Homo sapiens)")
+            .unwrap();
+        assert_eq!(
+            human.metadata.get("user_edit").map(String::as_str),
+            Some("keep me"),
+            "a user-edited built-in must not be overwritten"
+        );
+        cleanup(&dir);
+
+        // ... and a stamped file whose content later diverged from its
+        // marker (an edit made after the snapshot was written).
+        let dir = scratch_dir("preserve-tampered");
+        let mut tampered = stamped_builtin(&crate::fixtures::human());
+        tampered
+            .metadata
+            .insert("user_edit".to_string(), "keep me too".to_string());
+        write_fixture_in(&dir, &tampered).unwrap();
+        let loaded = load_library_from(&dir);
+        let human = loaded
+            .iter()
+            .find(|s| s.name == "Human (Homo sapiens)")
+            .unwrap();
+        assert_eq!(
+            human.metadata.get("user_edit").map(String::as_str),
+            Some("keep me too"),
+            "a built-in whose marker no longer matches is user content"
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn deleted_builtin_stays_deleted() {
+        let dir = scratch_dir("deleted");
+        load_library_from(&dir); // bootstrap the 11 built-ins
+        delete_fixture_in(&dir, "Human (Homo sapiens)").unwrap();
+
+        let loaded = load_library_from(&dir);
+        assert_eq!(loaded.len(), 10, "a deleted built-in is not resurrected");
+        assert!(
+            !loaded.iter().any(|s| s.name == "Human (Homo sapiens)"),
+            "reconciliation must respect a user's deletion"
+        );
         cleanup(&dir);
     }
 }

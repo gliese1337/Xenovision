@@ -108,6 +108,11 @@ pub fn human() -> CurveSet {
     // exercised through real CurveSet data per §8.2's representability
     // requirement. `opponent_contrasts` lives on the regime - the
     // colorspace it defines - not the set (§2.2).
+    //
+    // The blue-yellow row is written yellow-positive, i.e. negated from the
+    // textbook S - (M+L)/2, so the composite encoder (whose c2 grows towards
+    // yellow) renders a Human perceptual image with blue/yellow the right way
+    // round. Magnitude-only metrics such as ΔS are unaffected by the sign.
     set.regimes = vec![Regime::new(SINGLE_COLOR_VISION_REGIMES[0], vec![0, 1, 2])];
     set.regimes[0].opponent_contrasts = Some(vec![
         OpponentContrast {
@@ -115,8 +120,8 @@ pub fn human() -> CurveSet {
             weights: vec![0.0, -1.0, 1.0],
         },
         OpponentContrast {
-            name: "S - (M+L)/2 (blue-yellow)".to_string(),
-            weights: vec![1.0, -0.5, -0.5],
+            name: "(M+L)/2 - S (yellow-blue)".to_string(),
+            weights: vec![-1.0, 0.5, 0.5],
         },
     ]);
 
@@ -801,7 +806,7 @@ mod tests {
         let config = set.regime_config(&set.regimes[0]);
         assert_eq!(
             config.candidate_rows,
-            vec![vec![0.0, -1.0, 1.0], vec![1.0, -0.5, -0.5]]
+            vec![vec![0.0, -1.0, 1.0], vec![-1.0, 0.5, 0.5]]
         );
         assert_eq!(
             contrasts[0].weights,

@@ -1,7 +1,5 @@
 # Xenovision User Guide
 
-A reference to every window, menu, and gesture in the current build.
-
 ## Overview
 
 Xenovision models and compares how different species perceive color. You
@@ -9,10 +7,10 @@ define a **visual system** as a set of photoreceptor sensitivity curves,
 Xenovision derives that system's luminance and chroma channels from them, and
 then evaluates arbitrary **stimulus spectra** (reflectance samples, light
 sources) through it to get perceptual coordinates and distances. Eleven
-literature-based species are built in, from trichromatic humans to the
+literature-based species are built in, from dichromatic dogs to the
 twelve-receptor mantis shrimp, and you can define your own alongside them.
 
-The interface is four panels - **Workspace**, **Comparison**, **Stimulus
+The interface consists of four panels - **Workspace**, **Comparison**, **Stimulus
 Editor**, and **Image Display** - sharing one window model (see
 [Arranging windows](#arranging-windows)): each panel is a **container** with
 its own top-level tab in the main window, each container holds one or more
@@ -34,39 +32,33 @@ right.](screenshots/main-window.png)
 - **Image Display** - render a loaded image (or one region of it) through a
   visual system's receptors and inspect the result channel by channel.
 
-Comparison, Stimulus Editor, and Image Display are **repeatable**: open
-several independent instances at once, each with its own setup, from a
-container's **＋ New** button or the **Windows** menu. They start closed on
-first launch.
-
 All four read and write the same underlying data. Edit a curve in Workspace
-and an open Comparison window updates on its next repaint - there's no
-separate "sync" step anywhere in the app.
+and an open Comparison window updates on its next repaint.
 
 ## Core concepts
 
-Xenovision standardizes on four curve types, plus two roles a curve can
-play:
+Xenovision standardizes on four curve types, plus three roles a curve can play:
 
 | Type | Meaning |
 |---|---|
 | **Sensitivity** | Unitless. A sample is meaningful only relative to the other curves in the same visual system - a receptor's response shape, not an absolute measurement. Always a Workspace curve, never a stimulus. |
-| **Radiance** | Units of power per area (an explicit unit string you set). A measurement of light itself - emitted, reflected, or otherwise reaching a point. |
+| **Radiance** | Units of power per area. A measurement of light itself - emitted, reflected, or otherwise reaching a point. |
 | **Reflectance** | Unitless, normalized so every sample is meant to fall in `[0, 1]` - a ratio describing a surface, not light itself. The Stimulus Editor flags (non-blocking) a curve with values outside that range. |
 | **Absorption** | Unitless, every sample in `[0, 1]`: the fraction of light an absorber lets through at that wavelength (1 = nothing absorbed). Applied to a luminant by point-wise multiplication, with a weight exponent: `luminant × absorption^weight` (0 = no effect, 1 = as-is, 2 = twice as strong, like passing through it twice). Atmospheric notches are absorption curves. |
 
 | Role | Meaning |
 |---|---|
+| **Response** | A Sensitivity curve indicating the response of a photoreceptor to incoming light at any frequency. |
 | **Luminant** | A Radiance curve used as the shared reference light every comparison is evaluated under. Managed in the Comparison window. |
-| **Stimulus curve** | Either a Radiance curve directly, or a Reflectance curve - in which case Comparison automatically filters it through the current luminant (`Reflectance × Luminant`) before evaluating it, rather than treating the raw ratio as if it were already light reaching the eye. Lives in the shared stimulus library (Stimulus Editor window), never in a Workspace tab. |
+| **Stimulus curve** | Either a Radiance curve directly, or a Reflectance curve - in which case Comparison automatically filters it through the current luminant (`Reflectance × Luminant`) before evaluating it, rather than treating the raw ratio as if it were already light reaching the eye. Lives in the shared stimulus library (Stimulus Editor window). |
 
 Other terms used throughout:
 
 | Term | Meaning |
 |---|---|
-| **Curve Set** | A named collection of receptor (Sensitivity) curves - one species' full visual system, open as a Workspace tab. |
+| **Curve Set** | A named collection of receptor response (Sensitivity) curves - one species' full visual system, open as a Workspace tab. |
 | **Regime** | A named colorspace: a set of pool receptors that jointly produce luminance + chroma, with its own membership, luminance weights, and opponent contrasts. Most species have one (their whole eye); the frog has three (scotopic/mesopic/photopic, §2.3.10); a receptor can be in several. |
-| **Unaffiliated receptor** | A receptor in the pool that belongs to no regime - e.g. non-color-vision photoreceptors (swallowtail butterfly's violet/broad-band classes), or (mantis shrimp) every receptor it has. Draws a hollow dot (○) in the left rail, reported individually, never part of any luminance/chroma calculation. |
+| **Unaffiliated receptor** | A receptor in the pool that belongs to no regime - e.g. non-color-vision photoreceptors (swallowtail butterfly's violet/broad-band classes), or every mantis shrimp receptor. Draws a hollow dot (○) in the left rail, reported individually, never part of any luminance/chroma calculation. |
 | **ω (Weber fraction)** | Per-receptor noise term. Blank means "no data," not zero. |
 | **η (relative density)** | Per-receptor density, meaningful relative to the other receptors in the same set. Also blank-means-no-data. |
 | **w_i (luminance weight)** | How much a receptor contributes to luminance. Blank = integral-derived default; set it to override. |
@@ -83,12 +75,19 @@ fixtures - into your system's per-user data directory
 tab per species. The stimulus library starts seeded with three example
 reflectance curves (Reddish/Greenish/Blueish) so Comparison has something to
 work with immediately, and the luminant list starts with a flat "Uniform"
-reference and a 5778K solar default. Nothing to configure.
+reference and a 5778K solar default.
+
+Built-in fixture files you haven't changed are kept current automatically:
+on launch, a built-in whose contents still match the copy Xenovision last
+wrote is refreshed if the shipped definition has since been updated. Modify a
+file (in the app or by hand) and it becomes yours - Xenovision leaves it alone
+from then on, and *Restore Default Fixtures...* is the way to pull the current
+shipped data back.
 
 ## Workspace window
 
-Three columns: left rail, center graph pane, right inspector. Drag the
-dividers to resize.
+The Workspace window consists of three columns: the left rail, the center
+graph pane, and the right inspector. Drag the dividers to resize.
 
 **Menu bar** - File (save/load, restore defaults, export CSV), View (axis
 orientation, global), Window (open, close, dock, or undock any panel - see
@@ -173,8 +172,6 @@ disjoint (it can never be active at any light level).
 
 ## Comparison window
 
-Top bar, then three columns.
-
 ![The Comparison window: the luminant picker on top, the input-spectra
 checklist on the left (four USGS reflectance curves ticked), the species
 checkboxes on the right (Human and Honeybee), and the per-species coordinate
@@ -230,7 +227,7 @@ refresh.
 
 ## Stimulus Editor window
 
-Where every stimulus curve (reflectance or radiance) is created and
+This is where every stimulus curve (reflectance or radiance) is created and
 edited - the counterpart to Workspace, but for the shared stimulus
 library instead of visual systems. Left rail: the library, with a **+ New
 stimulus ▾** menu and a **×** per curve to unload it (warns first if it has

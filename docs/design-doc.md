@@ -248,7 +248,7 @@ Peak sensitivities (λmax) below are literature-sourced (see References). Ten sp
 #### 2.3.1 Human (*Homo sapiens*) — Trichromat (N=3)
 - **S-cone**: λmax ≈ 420 nm. **M-cone**: λmax ≈ 530 nm. **L-cone**: λmax ≈ 560 nm.
 - **Luminance weighting**: L+M dominant, consistent with the standard photopic luminosity function (CIE V(λ)); S-cone contribution near zero.
-- **Opponent pairing**: literature-standard red-green (L−M) and blue-yellow (S−(L+M)) candidate contrasts, orthogonalized against luminance per §2.2.4 (both already nearly independent of luminance in the human case).
+- **Opponent pairing**: literature-standard red-green (L−M) and blue-yellow candidate contrasts, orthogonalized against luminance per §2.2.4 (both already nearly independent of luminance in the human case). The blue-yellow row is stored yellow-positive, (L+M)−S — the negation of the textbook S−(L+M) — so the perceptual composite's chroma encoder (whose C_b grows towards yellow) renders with blue and yellow oriented naturally; the contrast is the same up to sign, so sign-invariant metrics such as ΔS are unaffected.
 
 #### 2.3.2 Dog (*Canis lupus familiaris*) — Dichromat (N=2)
 - **S-cone**: λmax ≈ 429–435 nm. **L/M-cone**: λmax ≈ 555 nm.
@@ -617,6 +617,8 @@ The 11 built-in fixtures are shipped as **11 separate files**, one per Curve Set
 **Runtime treatment**: these files are placed in a known, user-visible location (e.g. an application data directory) as ordinary, user-editable files — not read-only bundled resources. A user can open, inspect, modify, or delete them exactly as they would any other saved Curve Set, using the mechanisms in §1.3/§1.5. This means the built-in presets are simultaneously (a) working examples a new user can learn the data format from by inspection, and (b) ordinary starting points a user can freely customize, with no separate "preset vs. custom" code path.
 
 **Recovery**: because these files are user-editable and can be modified, corrupted, or deleted, the application retains an internal pristine copy of all built-in fixtures (embedded as read-only reference data at build time, separate from the user-visible/editable copies on disk) and exposes a "restore defaults" / "re-extract fixtures" action that regenerates the user-visible files from this pristine copy.
+
+**Incremental refresh**: independently of the explicit restore action, the application reconciles the on-disk built-ins against the shipped definitions on every launch. Each file the application itself writes carries a content-hash marker in its metadata; a built-in file whose content still matches its marker (the user has not altered it) is automatically refreshed when the shipped definition has moved on, so corrections reach existing installations without a manual restore. A file whose marker no longer matches its content, or that never carried one, is treated as user content and left untouched — as are custom fixtures and deleted built-ins — so this never silently discards an edit.
 
 ### 8.4 Interaction with Other Sections
 §7's custom visual systems and the built-in preset species are the same kind of object at the data level: both the representability guarantee (§8.2) and the packaging decision (§8.3 — presets are editable like any other Curve Set) establish this directly.
