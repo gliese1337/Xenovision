@@ -484,6 +484,11 @@ impl Default for BatchExportState {
     }
 }
 
+/// Cache storage for [`TransformCache`]: `(species set, reference luminant)`
+/// -> (that set's regime pipelines, the species `revision` they were built
+/// from).
+type PipelineCache = HashMap<(CurveSetId, CurveId), (Rc<Vec<Pipeline>>, u64)>;
+
 /// Cross-window-shared cache (design doc §4.6): keyed by (species set,
 /// reference luminant), invalidated when the set's `revision` no longer
 /// matches what the cached pipelines were built from. `Pipeline` isn't
@@ -493,7 +498,7 @@ impl Default for BatchExportState {
 /// shrimp, whose receptors are reported individually, §10.2).
 #[derive(Default)]
 pub struct TransformCache {
-    cache: HashMap<(CurveSetId, CurveId), (Rc<Vec<Pipeline>>, u64)>,
+    cache: PipelineCache,
 }
 
 impl TransformCache {

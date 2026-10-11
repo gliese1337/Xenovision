@@ -198,11 +198,10 @@ fn restore_default_fixtures(app: &mut AppState) {
         };
         let mut curves = HashMap::new();
         let mut curve_order = Vec::new();
-        let mut counter = base;
-        for c in core_set.curves {
-            curve_order.push(counter);
-            curves.insert(counter, c);
-            counter += 1;
+        for (i, c) in core_set.curves.into_iter().enumerate() {
+            let id = base + i as u64;
+            curve_order.push(id);
+            curves.insert(id, c);
         }
         let regimes: Vec<AppRegime> = core_set
             .regimes
@@ -1228,7 +1227,7 @@ fn opponent_contrast_strip(
         if !regime
             .opponent_contrasts
             .as_ref()
-            .map_or(true, |v| v.is_empty())
+            .is_none_or(|v| v.is_empty())
             && ui.button("Clear all (use automatic fallback)").clicked()
         {
             regime.opponent_contrasts = None;
