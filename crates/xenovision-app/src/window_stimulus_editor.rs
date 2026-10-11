@@ -32,6 +32,7 @@ use xenovision_core::hyperspectral::{self, HyperspectralCube, MatVariableInfo, R
 use xenovision_core::sensor_presets::{self, SensorBandPreset};
 use xenovision_core::{illumination, CurveType, QuantityKind, SpectralCurve};
 
+use crate::dock::PanelId;
 use crate::image_library::{self, ImageSource, ImageSourceId};
 use crate::multi_curve_editor;
 use crate::region_selector::{region_selector, RegionDraft};
@@ -153,8 +154,8 @@ impl Default for StimulusEditorState {
     }
 }
 
-pub fn ui(ui: &mut egui::Ui, app: &mut AppState) {
-    egui::SidePanel::left("stimulus_editor_rail")
+pub fn ui(ui: &mut egui::Ui, app: &mut AppState, id: PanelId) {
+    egui::SidePanel::left(egui::Id::new(("stimulus_editor_rail", id)))
         .resizable(true)
         .default_width(240.0)
         .show_inside(ui, |ui| {
@@ -450,13 +451,7 @@ fn request_unload(app: &mut AppState, id: CurveId) {
 fn unload(app: &mut AppState, id: CurveId) {
     app.stimulus_curves.remove(&id);
     app.stimulus_order.retain(|&i| i != id);
-    app.comparison.selected_stimuli.retain(|&i| i != id);
-    if app.stimulus_editor.selected == Some(id) {
-        app.stimulus_editor.selected = None;
-    }
-    if app.stimulus_editor.pending_unload == Some(id) {
-        app.stimulus_editor.pending_unload = None;
-    }
+    app.forget_stimulus(id);
 }
 
 /// An inline modal (egui has no native confirm dialog) warning before

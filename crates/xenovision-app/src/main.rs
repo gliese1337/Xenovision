@@ -1,8 +1,9 @@
 //! Xenovision GUI: four panel kinds (Workspace, Comparison, Stimulus
 //! Editor, Image Display; design doc `docs/design-doc.md`) sharing one
 //! `AppState`. The main OS window hosts any docked panels as tabs; each
-//! other panel floats in its own OS window or is hidden (see `dock`). Image
-//! Display is repeatable, so several of its panels can be open at once.
+//! other panel floats in its own OS window or is hidden (see `dock`).
+//! Workspace is single-instance, but Comparison, Stimulus Editor and Image
+//! Display are repeatable, so several of each can be open at once.
 
 // Release builds on Windows are GUI programs, so no console window opens
 // alongside the app. Debug builds keep the console for log output.
@@ -55,8 +56,15 @@ fn panel_ui(id: PanelId, ui: &mut egui::Ui, state: &mut state::AppState) {
             let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
             ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| match id.kind {
                 PanelKind::Workspace => window_workspace::ui(ui, state),
-                PanelKind::Comparison => window_comparison::ui(ui, state),
-                PanelKind::StimulusEditor => window_stimulus_editor::ui(ui, state),
+                // The repeatable panels: swap the instance's state into the
+                // `AppState` slot each window module reads, so the module itself
+                // needs no notion of instance numbers.
+                PanelKind::Comparison => {
+                    state.with_comparison(id, |state| window_comparison::ui(ui, state))
+                }
+                PanelKind::StimulusEditor => state.with_stimulus_editor(id, |state| {
+                    window_stimulus_editor::ui(ui, state, id)
+                }),
                 PanelKind::ImageDisplay => window_image_display::ui(ui, state, id),
             });
         });
@@ -257,6 +265,59 @@ mod layout_tests {
         );
         assert!(app.state.image_displays.contains_key(&a));
         assert!(app.state.image_displays.contains_key(&b));
+    }
+
+    /// Comparison and Stimulus Editor are repeatable too: extra instances keep
+    /// independent state (swapped into the module's `AppState` slot only while
+    /// that instance draws), the persistent primary is untouched, and closing
+    /// an extra discards just that instance.
+    #[test]
+    fn extra_comparison_and_stimulus_panels_keep_independent_state() {
+        let mut app = App::default();
+        let ctx = egui::Context::default();
+        let set_a = app.state.workspace.open_tabs[0];
+        let set_b = app.state.workspace.open_tabs[1];
+
+        let a = app.state.new_panel(PanelKind::Comparison, false);
+        let b = app.state.new_panel(PanelKind::Comparison, true);
+        assert_ne!(a, b);
+        assert_eq!(a.instance, 1, "instance 0 is the persistent primary");
+        assert_eq!(b.instance, 2);
+        app.state
+            .with_comparison(a, |s| s.comparison.selected_species = vec![set_a]);
+        app.state
+            .with_comparison(b, |s| s.comparison.selected_species = vec![set_b]);
+        assert!(
+            app.state.comparison.selected_species.is_empty(),
+            "an extra panel must not leak into the primary's state"
+        );
+
+        app.state.dock.apply(DockAction::Undock(a));
+        run_frames(&mut app, &ctx, 1000.0, 700.0, 3);
+        app.state
+            .with_comparison(a, |s| assert_eq!(s.comparison.selected_species, vec![set_a]));
+        app.state
+            .with_comparison(b, |s| assert_eq!(s.comparison.selected_species, vec![set_b]));
+
+        // Closing an extra discards it; the other and the primary persist.
+        app.state.dispatch_dock_action(DockAction::Close(b));
+        assert!(!app.state.extra_comparisons.contains_key(&b));
+        assert!(app.state.extra_comparisons.contains_key(&a));
+
+        let e1 = app.state.new_panel(PanelKind::StimulusEditor, false);
+        let e2 = app.state.new_panel(PanelKind::StimulusEditor, true);
+        let stim_a = app.state.stimulus_order[0];
+        let stim_b = app.state.stimulus_order[1];
+        app.state
+            .with_stimulus_editor(e1, |s| s.stimulus_editor.selected = Some(stim_a));
+        app.state
+            .with_stimulus_editor(e2, |s| s.stimulus_editor.selected = Some(stim_b));
+        run_frames(&mut app, &ctx, 1000.0, 700.0, 3);
+        app.state
+            .with_stimulus_editor(e1, |s| assert_eq!(s.stimulus_editor.selected, Some(stim_a)));
+        app.state
+            .with_stimulus_editor(e2, |s| assert_eq!(s.stimulus_editor.selected, Some(stim_b)));
+        assert_eq!(app.state.stimulus_editor.selected, None);
     }
 
     /// With every species and stimulus selected, the cross-species table

@@ -228,7 +228,7 @@ fn restore_default_fixtures(app: &mut AppState) {
         set.revision += 1;
         set.dirty = false;
         let set_id = set.id;
-        app.comparison.active_regime.remove(&set_id);
+        app.prune_comparison_active_regime(set_id);
         if let Some(tab) = app.workspace.per_tab.get_mut(&set_id) {
             *tab = crate::state::TabUiState::default();
             tab.status = "Restored to built-in defaults".to_string();
@@ -327,8 +327,7 @@ fn close_tab(app: &mut AppState, set_id: CurveSetId) {
             app.workspace.active_tab -= 1;
         }
     }
-    app.comparison.selected_species.retain(|&id| id != set_id);
-    app.comparison.active_regime.remove(&set_id);
+    app.prune_comparison_species(set_id);
     if app.workspace.pending_close == Some(set_id) {
         app.workspace.pending_close = None;
     }
@@ -1124,7 +1123,7 @@ fn remove_regime(app: &mut AppState, set_id: CurveSetId, idx: usize) {
                 other => other,
             };
         }
-        app.comparison.active_regime.remove(&set_id);
+        app.prune_comparison_active_regime(set_id);
     }
 }
 
