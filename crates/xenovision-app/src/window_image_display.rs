@@ -28,9 +28,7 @@ use xenovision_core::hyperspectral::{HyperspectralCube, Region};
 use xenovision_core::{ChannelStage, InputKind, ReceptorImage, ReceptorKernel, SpectralCurve};
 
 use crate::colormap::{self, Colormap};
-use crate::image_library::{
-    self, region_label, ImageLibrary, ImageSource, ImageSourceId,
-};
+use crate::image_library::{self, region_label, ImageLibrary, ImageSource, ImageSourceId};
 use crate::region_selector::{region_selector, RegionDraft};
 use crate::render_worker::{RenderEngine, RenderJob, RenderOutcome, RenderProduct};
 use crate::state::{AppCurveSet, AppState, CurveId, CurveSetId};
@@ -152,7 +150,11 @@ impl ImageDisplayState {
 /// Adds a view seeded from `source_id` (and, when provided, `region`), with
 /// defaults chosen for the currently-open visual system. Returns the new
 /// view's index.
-pub fn seed_view(app: &mut AppState, source_id: Option<ImageSourceId>, region: Option<Region>) -> usize {
+pub fn seed_view(
+    app: &mut AppState,
+    source_id: Option<ImageSourceId>,
+    region: Option<Region>,
+) -> usize {
     let id = app.image_display.alloc_view_id();
     let mut view = ImageView::new(id, source_id);
     view.set_id = default_set(app);
@@ -185,7 +187,9 @@ pub fn seed_from_editor(app: &mut AppState) {
     let region = app.stimulus_editor.selection.region.clone();
     seed_view(app, source, region);
     app.pending_dock_actions
-        .push(crate::dock::DockAction::OpenDocked(crate::dock::PanelKind::ImageDisplay));
+        .push(crate::dock::DockAction::OpenDocked(
+            crate::dock::PanelKind::ImageDisplay,
+        ));
 }
 
 // ---------------------------------------------------------------------------
@@ -299,7 +303,14 @@ fn render_pass(ctx: &egui::Context, app: &mut AppState) {
     // Dispatch views whose inputs changed since their last (or pending)
     // render.
     for view in views.iter_mut() {
-        dispatch_view(view, image_library, curve_sets, luminants, gpu.as_ref(), engine);
+        dispatch_view(
+            view,
+            image_library,
+            curve_sets,
+            luminants,
+            gpu.as_ref(),
+            engine,
+        );
     }
 
     // egui is reactive by default: with no input, it would stop painting
@@ -430,10 +441,9 @@ fn build_job(
     luminants: &HashMap<CurveId, SpectralCurve>,
 ) -> Result<(ReceptorKernel, Option<Region>, Arc<HyperspectralCube>), String> {
     let cube = source.cube.clone();
-    let wl = cube
-        .wavelengths_nm
-        .as_deref()
-        .ok_or_else(|| "Assign a wavelength axis to this image (Stimulus Editor) first.".to_string())?;
+    let wl = cube.wavelengths_nm.as_deref().ok_or_else(|| {
+        "Assign a wavelength axis to this image (Stimulus Editor) first.".to_string()
+    })?;
     if wl.is_empty() {
         return Err("The image's wavelength axis is empty.".to_string());
     }
@@ -473,13 +483,20 @@ fn build_job(
             .regime
             .unwrap_or_else(|| dominant_index(&kernels))
             .min(kernels.len() - 1);
-        kernels.into_iter().nth(idx).expect("index clamped in range")
+        kernels
+            .into_iter()
+            .nth(idx)
+            .expect("index clamped in range")
     };
     Ok((kernel, view.region.clone(), cube))
 }
 
 /// Builds the texture(s) shown for a finished render, per display mode.
-fn build_textures(ctx: &egui::Context, view: &ImageView, image: &ReceptorImage) -> Vec<egui::TextureHandle> {
+fn build_textures(
+    ctx: &egui::Context,
+    view: &ImageView,
+    image: &ReceptorImage,
+) -> Vec<egui::TextureHandle> {
     let opts = egui::TextureOptions::NEAREST;
     match view.display {
         DisplayMode::Channels => (0..image.channels.len())
@@ -523,8 +540,10 @@ fn composite_color_image(image: &ReceptorImage, comp: Composite) -> egui::ColorI
         let color = match comp {
             Composite::Perceptual if n_channels >= 3 => {
                 let l = colormap::normalize_unit(channel(0).unwrap()[i], range[0].0, range[0].1);
-                let c1 = colormap::normalize_opponent(channel(1).unwrap()[i], range[1].0, range[1].1);
-                let c2 = colormap::normalize_opponent(channel(2).unwrap()[i], range[2].0, range[2].1);
+                let c1 =
+                    colormap::normalize_opponent(channel(1).unwrap()[i], range[1].0, range[1].1);
+                let c2 =
+                    colormap::normalize_opponent(channel(2).unwrap()[i], range[2].0, range[2].1);
                 colormap::perceptual_lab(l, c1, c2)
             }
             Composite::Perceptual => egui::Color32::BLACK,
@@ -598,7 +617,10 @@ fn rail(ui: &mut egui::Ui, app: &mut AppState) {
     }
 
     ui.separator();
-    ui.label(format!("Loaded images ({})", app.image_library.sources.len()));
+    ui.label(format!(
+        "Loaded images ({})",
+        app.image_library.sources.len()
+    ));
     let mut to_select: Option<ImageSourceId> = None;
     let mut to_remove: Option<ImageSourceId> = None;
     for source in &app.image_library.sources {
@@ -715,11 +737,15 @@ fn ensure_preview(ctx: &egui::Context, source: &mut ImageSource) {
         source.band = 0;
     }
     let image = band_preview_image(&source.cube, source.band);
-    source.preview = Some(ctx.load_texture("img_display_preview", image, egui::TextureOptions::NEAREST));
+    source.preview =
+        Some(ctx.load_texture("img_display_preview", image, egui::TextureOptions::NEAREST));
     source.preview_key = key;
 }
 
-fn band_preview_image(cube: &xenovision_core::hyperspectral::HyperspectralCube, band: usize) -> egui::ColorImage {
+fn band_preview_image(
+    cube: &xenovision_core::hyperspectral::HyperspectralCube,
+    band: usize,
+) -> egui::ColorImage {
     let slice = cube.band_slice(band);
     let (min, max) = slice
         .iter()
@@ -756,8 +782,9 @@ fn draw_view(
                 ui.add(egui::TextEdit::singleline(&mut view.title).desired_width(180.0));
                 if view.pending.is_some() {
                     ui.spinner();
-                    ui.label("rendering…")
-                        .on_hover_text("Rendering in the background; the previous result stays until it's ready.");
+                    ui.label("rendering…").on_hover_text(
+                        "Rendering in the background; the previous result stays until it's ready.",
+                    );
                 }
                 if ui.small_button("Duplicate").clicked() {
                     *duplicate = Some(index);
@@ -881,10 +908,7 @@ fn settings_row(
                         view.regime = None;
                     }
                     for (i, name) in &regimes {
-                        if ui
-                            .selectable_label(view.regime == Some(*i), name)
-                            .clicked()
-                        {
+                        if ui.selectable_label(view.regime == Some(*i), name).clicked() {
                             view.regime = Some(*i);
                         }
                     }
@@ -945,7 +969,8 @@ fn settings_row(
                 egui::ComboBox::from_id_salt(("view_lum", view.id))
                     .selected_text(current)
                     .show_ui(ui, |ui| {
-                        let mut ordered: Vec<(&CurveId, &SpectralCurve)> = luminants.iter().collect();
+                        let mut ordered: Vec<(&CurveId, &SpectralCurve)> =
+                            luminants.iter().collect();
                         ordered.sort_by(|a, b| a.1.name.cmp(&b.1.name));
                         for (&id, curve) in ordered {
                             if ui
@@ -1012,7 +1037,10 @@ fn region_settings(ui: &mut egui::Ui, view: &mut ImageView, lib: &ImageLibrary) 
                     }
                 }
                 if ui
-                    .selectable_label(view.region_choice == RegionChoice::Custom, "custom (draw below)")
+                    .selectable_label(
+                        view.region_choice == RegionChoice::Custom,
+                        "custom (draw below)",
+                    )
                     .clicked()
                 {
                     view.region_choice = RegionChoice::Custom;
@@ -1047,7 +1075,11 @@ fn regions_equal(a: &Option<Region>, b: &Option<Region>) -> bool {
 fn display_settings(ui: &mut egui::Ui, view: &mut ImageView) {
     ui.horizontal(|ui| {
         ui.label("Show:");
-        ui.selectable_value(&mut view.display, DisplayMode::Channels, "One panel per channel");
+        ui.selectable_value(
+            &mut view.display,
+            DisplayMode::Channels,
+            "One panel per channel",
+        );
         ui.selectable_value(&mut view.display, DisplayMode::Composite, "Composite image");
     });
     match view.display {
@@ -1311,7 +1343,11 @@ mod tests {
             x1: 4.0,
             y1: 4.0,
         }));
-        let poly = region_sig(&Some(Region::Polygon(vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)])));
+        let poly = region_sig(&Some(Region::Polygon(vec![
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.0, 1.0),
+        ])));
         assert_ne!(whole, rect);
         assert_ne!(rect, poly);
     }
@@ -1319,7 +1355,10 @@ mod tests {
     #[test]
     fn stage_labels_are_human_readable() {
         assert_eq!(stage_label(ChannelStage::RawReceptor), "raw receptor");
-        assert_eq!(stage_label(ChannelStage::AdaptedReceptor), "von Kries adapted");
+        assert_eq!(
+            stage_label(ChannelStage::AdaptedReceptor),
+            "von Kries adapted"
+        );
         assert_eq!(stage_label(ChannelStage::Perceptual), "perceptual");
     }
 
@@ -1354,14 +1393,14 @@ mod tests {
         let view = &app.image_display.views[idx];
         assert!(view.error.is_none(), "render error: {:?}", view.error);
         let rendered = view.render.as_ref().expect("a render exists");
-        assert!(
-            !rendered.image.channels.is_empty(),
-            "no channels rendered"
-        );
+        assert!(!rendered.image.channels.is_empty(), "no channels rendered");
         assert_eq!(rendered.textures.len(), rendered.image.channels.len());
         assert_eq!(rendered.image.width, w);
         assert_eq!(rendered.image.height, h);
-        assert!(view.pending.is_none(), "the render should no longer be pending");
+        assert!(
+            view.pending.is_none(),
+            "the render should no longer be pending"
+        );
     }
 
     /// A changed view hands its render to the worker (marked pending) rather

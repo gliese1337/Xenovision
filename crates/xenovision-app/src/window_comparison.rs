@@ -286,9 +286,7 @@ fn luminant_power_control(ui: &mut egui::Ui, app: &mut AppState, id: CurveId) {
         return;
     };
     let total = curve.integral(STEP_NM);
-    ui.label(format!(
-        "Irradiance (W/m², ∫ over domain): {total:.3}"
-    ));
+    ui.label(format!("Irradiance (W/m², ∫ over domain): {total:.3}"));
 
     let mut factor: Option<f64> = None;
     ui.horizontal(|ui| {
@@ -554,10 +552,7 @@ fn dominant_regime(pipelines: &[Pipeline]) -> Option<usize> {
 ///
 /// `f = 1.0` (i = 48) is on the x-axis at today's light level, so the
 /// cursor in the plot always lands on a computed point.
-fn compute_dominance_series(
-    core: &CoreCurveSet,
-    pipelines: &[Pipeline],
-) -> Vec<(f64, Vec<f64>)> {
+fn compute_dominance_series(core: &CoreCurveSet, pipelines: &[Pipeline]) -> Vec<(f64, Vec<f64>)> {
     if pipelines.is_empty() {
         return Vec::new();
     }
@@ -614,10 +609,11 @@ fn draw_dominance_plot(
     if series.is_empty() {
         return;
     }
-    let (x_lo, x_hi) = series.iter().fold(
-        (f64::INFINITY, f64::NEG_INFINITY),
-        |(lo, hi), &(x, _)| (lo.min(x), hi.max(x)),
-    );
+    let (x_lo, x_hi) = series
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &(x, _)| {
+            (lo.min(x), hi.max(x))
+        });
     let height = 150.0;
     let (rect, _) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), height),
@@ -666,7 +662,10 @@ fn draw_dominance_plot(
 
     for (r, name) in regime_names.iter().enumerate() {
         let color = REGIME_COLORS[r % REGIME_COLORS.len()];
-        let points: Vec<Pos2> = series.iter().map(|&(x, ref rows)| to_screen(x, rows[r])).collect();
+        let points: Vec<Pos2> = series
+            .iter()
+            .map(|&(x, ref rows)| to_screen(x, rows[r]))
+            .collect();
         for w in points.windows(2) {
             painter.line_segment([w[0], w[1]], Stroke::new(2.0_f32, color));
         }
@@ -756,11 +755,7 @@ fn no_colorspace_report(
             ui.label("Seen irradiance (W/m²)");
             ui.label("Gain");
             ui.end_row();
-            for (curve, (&seen, &gain)) in core
-                .curves
-                .iter()
-                .zip(seen.iter().zip(gains.iter()))
-            {
+            for (curve, (&seen, &gain)) in core.curves.iter().zip(seen.iter().zip(gains.iter())) {
                 ui.label(&curve.name);
                 ui.label(format!("{seen:.3e}"));
                 ui.label(format!("{gain:.3}"));
@@ -779,7 +774,12 @@ fn no_colorspace_report(
     let raw: Vec<Vec<f64>> = stimuli
         .iter()
         .map(|stim| {
-            xenovision_core::pipeline::raw_activations_with_gains(&core.curves, &gains, stim, STEP_NM)
+            xenovision_core::pipeline::raw_activations_with_gains(
+                &core.curves,
+                &gains,
+                stim,
+                STEP_NM,
+            )
         })
         .collect();
     egui::Grid::new(("no_regime_activations", set_id))
@@ -866,19 +866,14 @@ fn single_species_tables(
             }
         }
     });
-    ui.label(
-        "★ marks the dominant regime at this light level; click a pill to switch the table.",
-    );
+    ui.label("★ marks the dominant regime at this light level; click a pill to switch the table.");
 
     ui.separator();
 
     // Regime-dominance plot: how each regime's activity trades off with
     // light level, sweeping the reference illuminant's power up/down.
     let series = compute_dominance_series(&core, &pipelines);
-    let regime_names: Vec<String> = pipelines
-        .iter()
-        .map(|p| p.name().to_string())
-        .collect();
+    let regime_names: Vec<String> = pipelines.iter().map(|p| p.name().to_string()).collect();
     draw_dominance_plot(
         ui,
         &series,

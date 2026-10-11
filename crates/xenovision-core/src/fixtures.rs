@@ -23,7 +23,12 @@ const STEP: f64 = 5.0;
 /// Regime name used by the single-regime species fixtures (every
 /// "plain one colorspace" species in this app gets this one regime; the
 /// frog's three are special-cased in `frog()`).
-const SINGLE_COLOR_VISION_REGIMES: [&str; 4] = ["Trichromat", "Dichromat", "Tetrachromat", "Color vision tetrachromat"];
+const SINGLE_COLOR_VISION_REGIMES: [&str; 4] = [
+    "Trichromat",
+    "Dichromat",
+    "Tetrachromat",
+    "Color vision tetrachromat",
+];
 
 fn cone_curve(name: &str, lambda_max: f64, citation: &str) -> SpectralCurve {
     cone_curve_with(Chromophore::A1, name, lambda_max, citation)
@@ -324,7 +329,10 @@ pub fn pigeon() -> CurveSet {
         pool.push(droplet);
     }
     set.curves = pool;
-    set.regimes = vec![Regime::new(SINGLE_COLOR_VISION_REGIMES[2], vec![0, 1, 2, 3])];
+    set.regimes = vec![Regime::new(
+        SINGLE_COLOR_VISION_REGIMES[2],
+        vec![0, 1, 2, 3],
+    )];
 
     set.metadata.insert(
         "note".to_string(),
@@ -370,7 +378,10 @@ pub fn goldfish() -> CurveSet {
             "Palacios, Goldsmith & Bernard 1998; Hárosi 1976",
         ),
     ];
-    set.regimes = vec![Regime::new(SINGLE_COLOR_VISION_REGIMES[2], vec![0, 1, 2, 3])];
+    set.regimes = vec![Regime::new(
+        SINGLE_COLOR_VISION_REGIMES[2],
+        vec![0, 1, 2, 3],
+    )];
     set.metadata.insert(
         "note".to_string(),
         "Curve shapes use the Govardovskii A2 (porphyropsin) template, not the default A1 - \
@@ -490,7 +501,10 @@ pub fn butterfly() -> CurveSet {
 
     set.curves.push(violet);
     set.curves.push(broad_band);
-    set.regimes = vec![Regime::new(SINGLE_COLOR_VISION_REGIMES[3], vec![0, 1, 2, 3])];
+    set.regimes = vec![Regime::new(
+        SINGLE_COLOR_VISION_REGIMES[3],
+        vec![0, 1, 2, 3],
+    )];
 
     set.metadata.insert(
         "note".to_string(),
@@ -735,11 +749,8 @@ mod tests {
         let illuminant = SpectralCurve::new("flat", CurveType::Illumination)
             .with_points(vec![(WL_MIN, 1.0), (WL_MAX, 1.0)]);
         let n_receptors = set.curves.len();
-        let pipeline = crate::pipeline::Pipeline::build(
-            set.default_regime_config(),
-            &illuminant,
-            1.0,
-        );
+        let pipeline =
+            crate::pipeline::Pipeline::build(set.default_regime_config(), &illuminant, 1.0);
         assert_eq!(pipeline.chroma_axis_count(), expected_chroma);
         assert!(
             n_receptors >= expected_chroma + 1 || n_receptors == 0,
@@ -862,7 +873,11 @@ mod tests {
     #[test]
     fn pigeon_is_n4_with_effective_curves_narrower_than_raw_opsins() {
         let set = pigeon();
-        assert_eq!(set.curves.len(), 12, "4 effective + 8 raw opsin/droplet curves in the pool");
+        assert_eq!(
+            set.curves.len(),
+            12,
+            "4 effective + 8 raw opsin/droplet curves in the pool"
+        );
         assert_eq!(
             set.regimes[0].curves,
             vec![0, 1, 2, 3],
@@ -888,7 +903,11 @@ mod tests {
         let effective_lws = set
             .curves
             .iter()
-            .find(|c| c.name.starts_with("Long-wave (LWS)") && !c.name.is_empty() && c.name != "Long-wave (LWS)")
+            .find(|c| {
+                c.name.starts_with("Long-wave (LWS)")
+                    && !c.name.is_empty()
+                    && c.name != "Long-wave (LWS)"
+            })
             .unwrap();
         let probe_wl = 450.0;
         let raw_v = raw_lws.value_at(probe_wl).unwrap();
@@ -955,8 +974,7 @@ mod tests {
                 && set.curves[5].name == "Broad-band (non-color-vision)"
         );
         assert!(
-            !set
-                .regimes
+            !set.regimes
                 .iter()
                 .flat_map(|r| r.curves.iter())
                 .any(|&i| i >= 4),
@@ -1027,7 +1045,10 @@ mod tests {
         // the cones are gated off, so the product over all five members
         // is ~0 while `is_active` (any member on) is still true - the
         // blurry-threshold notion a single pipeline can never expose.
-        assert!(mesopic.is_active(), "individual rods are on even in dim light");
+        assert!(
+            mesopic.is_active(),
+            "individual rods are on even in dim light"
+        );
         assert!(
             mesopic.regime_gain() < 1e-3,
             "but the whole-regime product collapses: {}",
@@ -1132,7 +1153,11 @@ mod tests {
             }
         }
 
-        let photopic_idx = forked.regimes.iter().position(|r| r.name == "Photopic").unwrap();
+        let photopic_idx = forked
+            .regimes
+            .iter()
+            .position(|r| r.name == "Photopic")
+            .unwrap();
         assert_eq!(
             forked.regimes[photopic_idx].curves.len(),
             2,
@@ -1153,10 +1178,7 @@ mod tests {
     fn mantis_shrimp_has_no_colorspace_regimes_at_all() {
         let set = mantis_shrimp();
         assert_eq!(set.curves.len(), 12);
-        assert!(
-            set.regimes.is_empty(),
-            "zero colorspace regimes by design"
-        );
+        assert!(set.regimes.is_empty(), "zero colorspace regimes by design");
 
         // The app builds no pipeline for a regime-less species; the
         // degenerate default config still builds without panicking (the
@@ -1171,7 +1193,11 @@ mod tests {
         let coords = pipeline.coordinates(&stimulus);
         assert_eq!(coords.luminance, 0.0);
         assert_eq!(coords.chroma, Vec::<f64>::new());
-        assert_eq!(pipeline.noise(), None, "ΔS must be unavailable, not fabricated");
+        assert_eq!(
+            pipeline.noise(),
+            None,
+            "ΔS must be unavailable, not fabricated"
+        );
         assert!(!pipeline.is_active());
 
         // The actually-meaningful output: every receptor reported
@@ -1199,11 +1225,7 @@ mod tests {
             "every fixture must have a distinct name"
         );
         for set in &fixtures {
-            assert!(
-                !set.curves.is_empty(),
-                "{} has no receptors",
-                set.name
-            );
+            assert!(!set.curves.is_empty(), "{} has no receptors", set.name);
             // The exact set can be a regime-less species (mantis) or a
             // single/multi-regime one - never both empty membership and
             // empty regimes simultaneously with nothing to show.
@@ -1228,21 +1250,15 @@ mod tests {
             let illuminant = SpectralCurve::new("flat", CurveType::Illumination)
                 .with_points(vec![(WL_MIN, 1.0), (WL_MAX, 1.0)]);
             if set.regimes.is_empty() {
-                let pipeline = crate::pipeline::Pipeline::build(
-                    set.default_regime_config(),
-                    &illuminant,
-                    1.0,
-                );
+                let pipeline =
+                    crate::pipeline::Pipeline::build(set.default_regime_config(), &illuminant, 1.0);
                 assert_eq!(pipeline.chroma_axis_count(), 0, "{}", set.name);
                 continue;
             }
             for (i, regime) in set.regimes.iter().enumerate() {
                 let n = set.regime_config(regime).curves.len();
-                let pipeline = crate::pipeline::Pipeline::build(
-                    set.regime_config(regime),
-                    &illuminant,
-                    1.0,
-                );
+                let pipeline =
+                    crate::pipeline::Pipeline::build(set.regime_config(regime), &illuminant, 1.0);
                 assert_eq!(
                     pipeline.chroma_axis_count(),
                     n.saturating_sub(1),

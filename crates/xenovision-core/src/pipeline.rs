@@ -11,7 +11,7 @@
 //! receptors being reported individually instead.
 
 use crate::adaptation::{derive_adaptation_matrix, AdaptationResult};
-use crate::curve::{operating_gain, DEFAULT_ILLUMINATION_SOFTNESS, SpectralCurve};
+use crate::curve::{operating_gain, SpectralCurve, DEFAULT_ILLUMINATION_SOFTNESS};
 use crate::curve_set::RegimeConfig;
 use crate::linalg::{self, dot, norm, Mat};
 
@@ -299,12 +299,8 @@ impl Pipeline {
         let regime_gain = response_gains.iter().product();
 
         let adaptation = derive_adaptation_matrix(&curves, step_nm);
-        let q_env: Vec<f64> = raw_activations_with_gains(
-            &curves,
-            &response_gains,
-            reference_illuminant,
-            step_nm,
-        );
+        let q_env: Vec<f64> =
+            raw_activations_with_gains(&curves, &response_gains, reference_illuminant, step_nm);
         let chroma_axes = build_chroma_axes(&candidate_rows, &luminance_weights, 1e-9);
 
         Pipeline {
@@ -409,11 +405,7 @@ impl Pipeline {
         // 1.0 (no scaling) - matching `adapt`'s per-element guard.
         let mut scaled = Mat::zeros(n);
         for (i, &e) in aq_env.iter().enumerate() {
-            let s = if e.abs() < 1e-12 {
-                1.0
-            } else {
-                1.0 / e
-            };
+            let s = if e.abs() < 1e-12 { 1.0 } else { 1.0 / e };
             for j in 0..n {
                 scaled.set(i, j, s * self.adaptation.matrix.get(i, j));
             }
@@ -449,10 +441,7 @@ impl Pipeline {
     /// Display names for this regime's member curves, in the same order
     /// `activations`/`adapted_activations`/`coordinates` use.
     pub fn curve_names(&self) -> Vec<&str> {
-        self.curves
-            .iter()
-            .map(|c| c.name.as_str())
-            .collect()
+        self.curves.iter().map(|c| c.name.as_str()).collect()
     }
 
     /// The perceptual coordinates `[L, C_1, ..., C_(N-1)]` plus saturation
@@ -696,10 +685,7 @@ mod tests {
         assert!(coords.chroma.iter().all(|c| c.is_finite()));
         // Every receptor is pinned at its cap, so the raw activations are
         // all exactly 1.0.
-        assert!(pipeline
-            .activations(&stimulus)
-            .iter()
-            .all(|&q| q == 1.0));
+        assert!(pipeline.activations(&stimulus).iter().all(|&q| q == 1.0));
     }
 
     #[test]
@@ -730,10 +716,7 @@ mod tests {
         assert_eq!(raw.len(), 3);
         assert_eq!(adapted.len(), 3);
         assert_ne!(raw, adapted, "adaptation should actually change the values");
-        assert_eq!(
-            pipeline.curve_names(),
-            vec!["S-cone", "M-cone", "L-cone"]
-        );
+        assert_eq!(pipeline.curve_names(), vec!["S-cone", "M-cone", "L-cone"]);
     }
 
     #[test]
@@ -773,11 +756,9 @@ mod tests {
         // And its raw activation under a stimulus is equally plain.
         let stimulus = SpectralCurve::new("test", CurveType::Reflectance)
             .with_points(vec![(300.0, 0.5), (750.0, 0.5)]);
-        let raw = crate::pipeline::raw_activations(
-            std::slice::from_ref(&set.curves[4]),
-            &stimulus,
-            1.0,
-        )[0];
+        let raw =
+            crate::pipeline::raw_activations(std::slice::from_ref(&set.curves[4]), &stimulus, 1.0)
+                [0];
         let direct_raw = integrate_product(&violet, &stimulus, 1.0);
         assert!(
             (raw - direct_raw).abs() < 1e-6,
@@ -993,8 +974,7 @@ mod tests {
         // from a regime that's genuinely all-on - only the per-regime
         // product can.
         let mut dim_only = CurveSet::new("Dim only");
-        dim_only.curves =
-            vec![pair.curves[0].clone()];
+        dim_only.curves = vec![pair.curves[0].clone()];
         dim_only.regimes = vec![crate::curve_set::Regime::new("Dim", vec![0])];
         let single = build_default(dim_only, &mid);
         assert!(

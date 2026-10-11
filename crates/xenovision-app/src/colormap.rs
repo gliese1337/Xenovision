@@ -93,7 +93,11 @@ fn viridis(t: f32) -> (u8, u8, u8) {
     let span = (hi.0 - lo.0).max(f32::MIN_POSITIVE);
     let f = (t - lo.0) / span;
     let mix = |a: f32, b: f32| (a + (b - a) * f).round().clamp(0.0, 255.0) as u8;
-    (mix(lo.1 .0, hi.1 .0), mix(lo.1 .1, hi.1 .1), mix(lo.1 .2, hi.1 .2))
+    (
+        mix(lo.1 .0, hi.1 .0),
+        mix(lo.1 .1, hi.1 .1),
+        mix(lo.1 .2, hi.1 .2),
+    )
 }
 
 /// The perceptual stage's `[L, C1, C2]` → color map. `l` is lightness in

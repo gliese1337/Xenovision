@@ -13,7 +13,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::curve::{DEFAULT_ILLUMINATION_SOFTNESS, SpectralCurve};
+use crate::curve::{SpectralCurve, DEFAULT_ILLUMINATION_SOFTNESS};
 use crate::pipeline::generic_candidate_rows;
 
 /// A named, literature-defined opponent contrast (§4.2.4): which curves
@@ -197,7 +197,10 @@ impl<'de> Deserialize<'de> for CurveSet {
         // regime. The legacy format is recognized by its
         // `colorspace_curves` list.
         let value = serde_json::Value::deserialize(deserializer)?;
-        let has_curves = value.get("curves").map(serde_json::Value::is_array).unwrap_or(false);
+        let has_curves = value
+            .get("curves")
+            .map(serde_json::Value::is_array)
+            .unwrap_or(false);
         let parse = |value: serde_json::Value| -> Result<CurveSet, D::Error> {
             if has_curves {
                 let current: CurrentCurveSet =
@@ -278,10 +281,7 @@ impl CurveSet {
 
     /// Effective operating window for one curve: its own bound if set,
     /// else the set-level default.
-    fn effective_illumination_window(
-        &self,
-        curve: &SpectralCurve,
-    ) -> (Option<f64>, Option<f64>) {
+    fn effective_illumination_window(&self, curve: &SpectralCurve) -> (Option<f64>, Option<f64>) {
         (
             curve.illumination_min.or(self.illumination_min),
             curve.illumination_max.or(self.illumination_max),
@@ -344,13 +344,12 @@ impl CurveSet {
                 .flatten()
                 .any(|b| b <= 0.0)
             || self.curves.iter().any(|c| {
-                c.has_invalid_illumination_window()
-                    || {
-                        // Per-curve bounds can also cross the set
-                        // default they fall back to.
-                        let (lo, hi) = self.effective_illumination_window(c);
-                        matches!((lo, hi), (Some(lo), Some(hi)) if lo >= hi)
-                    }
+                c.has_invalid_illumination_window() || {
+                    // Per-curve bounds can also cross the set
+                    // default they fall back to.
+                    let (lo, hi) = self.effective_illumination_window(c);
+                    matches!((lo, hi), (Some(lo), Some(hi)) if lo >= hi)
+                }
             })
     }
 
@@ -574,11 +573,7 @@ mod tests {
     fn luminance_weights_use_integral_default_when_unset() {
         let set = sample_set();
         let weights = set.luminance_weights(1.0);
-        let integrals: Vec<f64> = set
-            .curves
-            .iter()
-            .map(|c| c.integral(1.0))
-            .collect();
+        let integrals: Vec<f64> = set.curves.iter().map(|c| c.integral(1.0)).collect();
         let total: f64 = integrals.iter().sum();
         for (w, integral) in weights.iter().zip(integrals.iter()) {
             assert!((w - integral / total).abs() < 1e-9);
@@ -675,7 +670,10 @@ mod tests {
         cone.omega = Some(0.1);
         cone.eta = Some(3.0);
         set.curves = vec![rod, cone.clone()];
-        set.regimes = vec![Regime::new("Scotopic", vec![0]), Regime::new("Mesopic", vec![0, 1])];
+        set.regimes = vec![
+            Regime::new("Scotopic", vec![0]),
+            Regime::new("Mesopic", vec![0, 1]),
+        ];
 
         let scotopic = set.regime_config(&set.regimes[0]);
         assert_eq!(scotopic.noise.unwrap().len(), 1);

@@ -144,7 +144,10 @@ mod tests {
         // One single-regime colorspace so the set has the pool+regimes
         // shape the app's editing surfaces produce (regimes own the
         // opponent contrasts).
-        s.regimes.push(xenovision_core::curve_set::Regime::new("Colorspace", vec![0]));
+        s.regimes.push(xenovision_core::curve_set::Regime::new(
+            "Colorspace",
+            vec![0],
+        ));
         s
     }
 
@@ -204,7 +207,7 @@ mod tests {
         // right now must discard the whole in-progress edit in one go
         // (back to 0.5), not step through intermediate frames.
         let mut probe = set.clone();
-// Undo discards the in-progress edit... probe renames handled below.
+        // Undo discards the in-progress edit... probe renames handled below.
         mgr.undo(&mut probe);
         assert_eq!(probe.curves[0].points[0].1, 0.5);
         assert!(!mgr.can_redo(), "a discarded pending edit isn't redoable");
@@ -213,10 +216,7 @@ mod tests {
         mgr.observe(&set, widget(1));
         mgr.observe(&set, None); // focus released -> settles now
         mgr.undo(&mut set);
-        assert_eq!(
-            set.curves[0].points[0].1, 0.5,
-            "now a committed step"
-        );
+        assert_eq!(set.curves[0].points[0].1, 0.5, "now a committed step");
     }
 
     #[test]
@@ -255,11 +255,7 @@ mod tests {
 
         mgr.undo(&mut set); // undoes B (eta)
         assert_eq!(set.curves[0].eta, None);
-        assert_eq!(
-            set.curves[0].omega,
-            Some(0.05),
-            "A's edit must survive"
-        );
+        assert_eq!(set.curves[0].omega, Some(0.05), "A's edit must survive");
 
         mgr.undo(&mut set); // undoes A (omega)
         assert_eq!(set.curves[0].omega, None);
@@ -319,14 +315,7 @@ mod tests {
 
         assert_eq!(set.curves[0].points[0].1, 0.6);
         assert_eq!(set.curves[0].omega, Some(0.05));
-        assert_eq!(
-            set.regimes[0]
-                .opponent_contrasts
-                .as_ref()
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(set.regimes[0].opponent_contrasts.as_ref().unwrap().len(), 1);
 
         mgr.undo(&mut set); // undoes #3
         assert_eq!(
@@ -336,18 +325,11 @@ mod tests {
                 .map_or(0, |v| v.len()),
             0
         );
-        assert_eq!(
-            set.curves[0].omega,
-            Some(0.05),
-            "earlier edits remain"
-        );
+        assert_eq!(set.curves[0].omega, Some(0.05), "earlier edits remain");
 
         mgr.undo(&mut set); // undoes #2
         assert_eq!(set.curves[0].omega, None);
-        assert_eq!(
-            set.curves[0].points[0].1, 0.6,
-            "earlier edit remains"
-        );
+        assert_eq!(set.curves[0].points[0].1, 0.6, "earlier edit remains");
 
         mgr.undo(&mut set); // undoes #1
         assert_eq!(set.curves[0].points[0].1, 0.5);

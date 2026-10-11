@@ -8,10 +8,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use eframe::egui;
-use xenovision_core::curve_set::{CurveSet as CoreCurveSet, OpponentContrast, Regime as CoreRegime};
-use xenovision_core::{
-    fixture_library, natural_opponent, CurveType, QuantityKind, SpectralCurve,
+use xenovision_core::curve_set::{
+    CurveSet as CoreCurveSet, OpponentContrast, Regime as CoreRegime,
 };
+use xenovision_core::{fixture_library, natural_opponent, CurveType, QuantityKind, SpectralCurve};
 
 use crate::multi_curve_editor;
 use crate::plot_axis::{self, AxisOrientation};
@@ -581,12 +581,7 @@ fn new_curve_menu(ui: &mut egui::Ui, app: &mut AppState, set_id: CurveSetId) {
     }
 }
 
-fn add_curve(
-    app: &mut AppState,
-    set_id: CurveSetId,
-    curve: SpectralCurve,
-    regime: Option<usize>,
-) {
+fn add_curve(app: &mut AppState, set_id: CurveSetId, curve: SpectralCurve, regime: Option<usize>) {
     let id = app.alloc_id();
     if let Some(set) = app.curve_sets.get_mut(&set_id) {
         set.curves.insert(id, curve);
@@ -644,7 +639,9 @@ fn pool_editor(
                 );
             }
             _ => {
-                ui.label("No receptor curves in this set yet - use \"+ New Curve\" in the left rail.");
+                ui.label(
+                    "No receptor curves in this set yet - use \"+ New Curve\" in the left rail.",
+                );
             }
         }
         return;
@@ -1316,7 +1313,10 @@ fn natural_scene_generator(
                 .show_ui(ui, |ui| {
                     for &id in &app.luminant_order {
                         if let Some(curve) = app.luminants.get(&id) {
-                            if ui.selectable_label(illuminant == Some(id), &curve.name).clicked() {
+                            if ui
+                                .selectable_label(illuminant == Some(id), &curve.name)
+                                .clicked()
+                            {
                                 illuminant = Some(id);
                             }
                         }
@@ -1373,7 +1373,10 @@ fn natural_scene_generator(
                     );
                 } else {
                     ui.horizontal(|ui| {
-                        ui.label(format!("{} curve(s) selected. Apply weight:", corpus_weights.len()));
+                        ui.label(format!(
+                            "{} curve(s) selected. Apply weight:",
+                            corpus_weights.len()
+                        ));
                         ui.add(
                             egui::DragValue::new(&mut shared_weight_buf)
                                 .speed(0.1)
@@ -1398,14 +1401,14 @@ fn natural_scene_generator(
         {
             if let Some(illum_curve) = illuminant.and_then(|id| app.luminants.get(&id).cloned()) {
                 let result = match mode {
-                    NaturalSceneMode::Parametric => Some(
-                        natural_opponent::derive_from_parametric_model(
+                    NaturalSceneMode::Parametric => {
+                        Some(natural_opponent::derive_from_parametric_model(
                             &colorspace_curves,
                             &illum_curve,
                             correlation_length_nm,
                             STEP_NM,
-                        ),
-                    ),
+                        ))
+                    }
                     NaturalSceneMode::Corpus => {
                         let entries: Vec<natural_opponent::CorpusEntry> = corpus_weights
                             .iter()

@@ -1254,11 +1254,7 @@ mod tests {
         let mut g = vec![0.0f64; n * n];
         for a in 0..n {
             for b in a..n {
-                let d: f64 = sampled[a]
-                    .iter()
-                    .zip(&sampled[b])
-                    .map(|(x, y)| x * y)
-                    .sum();
+                let d: f64 = sampled[a].iter().zip(&sampled[b]).map(|(x, y)| x * y).sum();
                 let v = d * step_nm;
                 g[a * n + b] = v;
                 g[b * n + a] = v;

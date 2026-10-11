@@ -163,7 +163,10 @@ pub fn source_label(source: &ImageSource) -> String {
             wl.first().copied().unwrap_or(0.0),
             wl.last().copied().unwrap_or(0.0),
         ),
-        _ => format!("{} · {} bands (no wavelength axis)", source.label, source.cube.bands),
+        _ => format!(
+            "{} · {} bands (no wavelength axis)",
+            source.label, source.cube.bands
+        ),
     }
 }
 
@@ -195,8 +198,24 @@ mod tests {
     #[test]
     fn save_region_replaces_same_name() {
         let mut src = ImageSource::new("s", "s", cube());
-        src.save_region("r", Region::Rectangle { x0: 0.0, y0: 0.0, x1: 1.0, y1: 1.0 });
-        src.save_region("r", Region::Rectangle { x0: 0.0, y0: 0.0, x1: 2.0, y1: 2.0 });
+        src.save_region(
+            "r",
+            Region::Rectangle {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 1.0,
+                y1: 1.0,
+            },
+        );
+        src.save_region(
+            "r",
+            Region::Rectangle {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 2.0,
+                y1: 2.0,
+            },
+        );
         assert_eq!(src.regions.len(), 1, "same-named region should replace");
         assert!(matches!(
             src.regions[0].region,

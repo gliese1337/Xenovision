@@ -672,7 +672,8 @@ impl Iterator for PixelChannels<'_> {
         if self.c >= self.image.channels.len() {
             return None;
         }
-        let v = self.image.data[self.c * self.image.n_pixels() + self.y * self.image.width + self.x];
+        let v =
+            self.image.data[self.c * self.image.n_pixels() + self.y * self.image.width + self.x];
         self.c += 1;
         Some(v)
     }
@@ -905,12 +906,11 @@ mod tests {
         // A flat receptor S=1 over the full axis: the kernel's band sum
         // must equal pipeline::integrate_product's trapezoid rule.
         let mut set = trichromat_set();
-        set.curves[0] = SpectralCurve::new("FlatS", CurveType::Sensitivity)
-            .with_points(
-                AXIS.iter()
-                    .map(|&wl| (wl, 1.0))
-                    .collect::<Vec<(f64, f64)>>(),
-            );
+        set.curves[0] = SpectralCurve::new("FlatS", CurveType::Sensitivity).with_points(
+            AXIS.iter()
+                .map(|&wl| (wl, 1.0))
+                .collect::<Vec<(f64, f64)>>(),
+        );
         let config = set.regime_config(&set.regimes[0]);
 
         // One pixel, known values.
@@ -1035,11 +1035,7 @@ mod tests {
                 }
 
                 let coords = pipeline.coordinates(&pcurve);
-                let expected = [
-                    coords.luminance,
-                    coords.chroma[0],
-                    coords.chroma[1],
-                ];
+                let expected = [coords.luminance, coords.chroma[0], coords.chroma[1]];
                 let pix_perc: Vec<f32> = img_perc.pixel(col, row).collect();
                 for (c, &e) in expected.iter().enumerate() {
                     let d = (pix_perc[c] as f64 - e).abs();
@@ -1143,22 +1139,22 @@ mod tests {
     #[test]
     fn pool_kernel_honors_windows_and_unaffiliated_receptors() {
         let mut set = CurveSet::new("Frog-pool");
-        set.curves.push(
-            gaussian("Rod", 505.0, 40.0)
-                .with_illumination_window(Some(1.0), Some(10.0)),
-        );
+        set.curves
+            .push(gaussian("Rod", 505.0, 40.0).with_illumination_window(Some(1.0), Some(10.0)));
         set.curves.push(
             gaussian("M-cone", 530.0, 40.0).with_illumination_window(Some(30.0), Some(1000.0)),
         );
         // A third receptor in no regime at all - still rendered by for_pool.
-        set.curves
-            .push(gaussian("L-cone", 570.0, 45.0).with_illumination_window(Some(30.0), Some(1000.0)));
+        set.curves.push(
+            gaussian("L-cone", 570.0, 45.0).with_illumination_window(Some(30.0), Some(1000.0)),
+        );
         set.regimes
             .push(crate::curve_set::Regime::new("Photopic", vec![1, 2]));
 
         let light = flat_light();
-        let kernel = ReceptorKernel::for_pool(&set, &AXIS, Some(&light), InputKind::Radiance, STEP_NM)
-            .unwrap();
+        let kernel =
+            ReceptorKernel::for_pool(&set, &AXIS, Some(&light), InputKind::Radiance, STEP_NM)
+                .unwrap();
         assert_eq!(kernel.channel_names(), ["Rod", "M-cone", "L-cone"]);
         assert!(kernel.regime_name().is_none());
         // Three pool channels; Rod (window far below the ~100 W/m² it sees)
@@ -1186,9 +1182,8 @@ mod tests {
         let mut set = CurveSet::new("Frog");
         set.curves
             .push(gaussian("Rod", 505.0, 40.0).with_illumination_window(Some(1.0), Some(10.0)));
-        set.curves.push(
-            gaussian("Cone", 530.0, 40.0).with_illumination_window(Some(30.0), Some(1000.0)),
-        );
+        set.curves
+            .push(gaussian("Cone", 530.0, 40.0).with_illumination_window(Some(30.0), Some(1000.0)));
         set.regimes
             .push(crate::curve_set::Regime::new("Scotopic", vec![0]));
         set.regimes
@@ -1209,10 +1204,24 @@ mod tests {
         assert_eq!(kernels[1].regime_name(), Some("Photopic"));
 
         // In bright light the scotopic regime is off; photopic is on.
-        assert!(!kernels[0].is_active(), "scotopic should be inactive in bright light");
-        assert!(kernels[0].regime_gain() < 0.05, "scotopic regime_gain {}", kernels[0].regime_gain());
-        assert!(kernels[1].is_active(), "photopic should be active in bright light");
-        assert!(kernels[1].regime_gain() > 0.8, "photopic regime_gain {}", kernels[1].regime_gain());
+        assert!(
+            !kernels[0].is_active(),
+            "scotopic should be inactive in bright light"
+        );
+        assert!(
+            kernels[0].regime_gain() < 0.05,
+            "scotopic regime_gain {}",
+            kernels[0].regime_gain()
+        );
+        assert!(
+            kernels[1].is_active(),
+            "photopic should be active in bright light"
+        );
+        assert!(
+            kernels[1].regime_gain() > 0.8,
+            "photopic regime_gain {}",
+            kernels[1].regime_gain()
+        );
     }
 
     #[test]
@@ -1247,8 +1256,9 @@ mod tests {
         assert!(matches!(err, ReceptorImageError::RegimeHasNoMembers));
 
         // Pool rendering works fine for the regime-less set.
-        let pool = ReceptorKernel::for_pool(&set, &AXIS, Some(&light), InputKind::Radiance, STEP_NM)
-            .unwrap();
+        let pool =
+            ReceptorKernel::for_pool(&set, &AXIS, Some(&light), InputKind::Radiance, STEP_NM)
+                .unwrap();
         assert_eq!(pool.channel_names(), ["UV", "R"]);
     }
 

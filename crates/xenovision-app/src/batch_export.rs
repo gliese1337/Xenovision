@@ -137,7 +137,11 @@ pub fn run_export(app: &mut AppState, path: &str) -> Result<usize, String> {
     writeln!(
         w,
         "{}",
-        header.iter().map(|h| csv_field(h)).collect::<Vec<_>>().join(",")
+        header
+            .iter()
+            .map(|h| csv_field(h))
+            .collect::<Vec<_>>()
+            .join(",")
     )
     .map_err(|e| e.to_string())?;
 
@@ -153,9 +157,10 @@ pub fn run_export(app: &mut AppState, path: &str) -> Result<usize, String> {
             }
             row.push(coords.saturation.to_string());
             if include_distance {
-                let d = col.reference_coords.as_ref().and_then(|rc| {
-                    comparison::distance(&coords, rc, metric, pipeline.noise())
-                });
+                let d = col
+                    .reference_coords
+                    .as_ref()
+                    .and_then(|rc| comparison::distance(&coords, rc, metric, pipeline.noise()));
                 row.push(d.map(|v| v.to_string()).unwrap_or_default());
             }
         }
@@ -332,7 +337,10 @@ mod tests {
         let reddish_row = lines.next().unwrap();
         let last_field: &str = reddish_row.split(',').next_back().unwrap();
         let d: f64 = last_field.parse().unwrap();
-        assert!(d.abs() < 1e-9, "reference row's distance to itself should be ~0, got {d}");
+        assert!(
+            d.abs() < 1e-9,
+            "reference row's distance to itself should be ~0, got {d}"
+        );
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();

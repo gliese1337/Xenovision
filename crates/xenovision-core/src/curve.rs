@@ -132,12 +132,7 @@ pub const DEFAULT_ILLUMINATION_SOFTNESS: f64 = 0.5;
 /// unbounded window, so a bad value degrades to "always on" rather than
 /// silently zeroing a receptor - `CurveSet::has_invalid_illumination_window`
 /// surfaces the mistake to the user.
-pub fn operating_gain(
-    level: f64,
-    min: Option<f64>,
-    max: Option<f64>,
-    softness: f64,
-) -> f64 {
+pub fn operating_gain(level: f64, min: Option<f64>, max: Option<f64>, softness: f64) -> f64 {
     let valid_min = min.filter(|m| *m > 0.0);
     let valid_max = max.filter(|m| *m > 0.0);
     // Reject a crossed/empty window (or one whose bounds make no sense) as
@@ -457,15 +452,31 @@ mod tests {
         // the sigmoid has fully saturated to 1.
         let g = |level| operating_gain(level, Some(1e-8), Some(1e8), 0.5);
         assert!((g(1.0) - 1.0).abs() < 1e-9, "mid-window should be fully on");
-        assert!((g(1e-3) - 1.0).abs() < 1e-9, "5 decades inside the lower shoulder");
-        assert!((g(1e3) - 1.0).abs() < 1e-9, "5 decades inside the upper shoulder");
+        assert!(
+            (g(1e-3) - 1.0).abs() < 1e-9,
+            "5 decades inside the lower shoulder"
+        );
+        assert!(
+            (g(1e3) - 1.0).abs() < 1e-9,
+            "5 decades inside the upper shoulder"
+        );
         // Well outside (many decades) -> ~0.
         assert!(g(1e-12) < 1e-3, "far below min: {}", g(1e-12));
         assert!(g(1e12) < 1e-3, "far above max: {}", g(1e12));
         // The lower shoulder is monotonically increasing, the upper
         // monotonically decreasing.
-        assert!(g(1e-7) < g(1e-6), "lower shoulder should rise, got {} then {}", g(1e-7), g(1e-6));
-        assert!(g(1e7) > g(1e8), "upper shoulder should fall, got {} then {}", g(1e7), g(1e8));
+        assert!(
+            g(1e-7) < g(1e-6),
+            "lower shoulder should rise, got {} then {}",
+            g(1e-7),
+            g(1e-6)
+        );
+        assert!(
+            g(1e7) > g(1e8),
+            "upper shoulder should fall, got {} then {}",
+            g(1e7),
+            g(1e8)
+        );
         // Zero/negative irradiance is treated as infinitely dark.
         assert_eq!(g(0.0), 0.0);
         assert_eq!(g(-5.0), 0.0);

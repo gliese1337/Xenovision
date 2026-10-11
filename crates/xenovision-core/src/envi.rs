@@ -110,12 +110,10 @@ fn required_usize(
     field: &str,
     path: &str,
 ) -> Result<usize, EnviError> {
-    let raw = entries
-        .get(field)
-        .ok_or_else(|| EnviError::MissingField {
-            path: path.to_string(),
-            field: field.to_string(),
-        })?;
+    let raw = entries.get(field).ok_or_else(|| EnviError::MissingField {
+        path: path.to_string(),
+        field: field.to_string(),
+    })?;
     raw.trim()
         .parse::<usize>()
         .map_err(|_| EnviError::InvalidField {
@@ -219,10 +217,11 @@ pub fn load_envi(input: impl AsRef<Path>) -> Result<EnviCube, EnviError> {
     let header_path_str = header_path.display().to_string();
     let data_path_str = data_path.display().to_string();
 
-    let header_text = std::fs::read_to_string(&header_path).map_err(|source| EnviError::HeaderIo {
-        path: header_path_str.clone(),
-        source,
-    })?;
+    let header_text =
+        std::fs::read_to_string(&header_path).map_err(|source| EnviError::HeaderIo {
+            path: header_path_str.clone(),
+            source,
+        })?;
     let entries = parse_header(&header_text);
 
     let samples = required_usize(&entries, "samples", &header_path_str)?;
@@ -356,7 +355,13 @@ mod tests {
         }
     }
 
-    fn write_fixture(dir: &Path, interleave: &str, samples: usize, lines: usize, bands: usize) -> PathBuf {
+    fn write_fixture(
+        dir: &Path,
+        interleave: &str,
+        samples: usize,
+        lines: usize,
+        bands: usize,
+    ) -> PathBuf {
         let dat_path = dir.join(format!("{interleave}.dat"));
         let hdr_path = dir.join(format!("{interleave}.hdr"));
         let value_at = |b: usize, l: usize, s: usize| (b * 100 + l * 10 + s) as f32;
@@ -414,7 +419,10 @@ mod tests {
         for interleave in ["bsq", "bil", "bip"] {
             let path = write_fixture(&dir.0, interleave, samples, lines, bands);
             let cube = load_envi(&path).unwrap();
-            assert_eq!((cube.samples, cube.lines, cube.bands), (samples, lines, bands));
+            assert_eq!(
+                (cube.samples, cube.lines, cube.bands),
+                (samples, lines, bands)
+            );
             assert_eq!(
                 cube.wavelengths_nm,
                 Some(vec![400.0, 450.0, 500.0, 550.0, 600.0]),
@@ -470,7 +478,10 @@ mod tests {
         let hdr = "ENVI\nsamples = 1\nlines = 1\nbands = 1\ndata type = 6\ninterleave = bsq\n";
         std::fs::write(&hdr_path, hdr).unwrap();
         let err = load_envi(&dat_path).unwrap_err();
-        assert!(matches!(err, EnviError::UnsupportedDataType { code: 6, .. }));
+        assert!(matches!(
+            err,
+            EnviError::UnsupportedDataType { code: 6, .. }
+        ));
     }
 
     #[test]

@@ -258,8 +258,7 @@ mod tests {
         supersede(&mut queued, test_job(2, "d")); // cancels (2, "b")
         supersede(&mut queued, test_job(1, "e")); // cancels (1, "c")
 
-        let seen: Vec<(u64, String)> =
-            queued.iter().map(|j| (j.view_id, j.key.clone())).collect();
+        let seen: Vec<(u64, String)> = queued.iter().map(|j| (j.view_id, j.key.clone())).collect();
         assert_eq!(
             seen,
             vec![(1, "e".to_string()), (2, "d".to_string())],

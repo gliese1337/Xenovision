@@ -778,7 +778,10 @@ mod tests {
                 unit: "relative".to_string()
             }
         );
-        assert_eq!(curve.points, vec![(400.0, 1.0), (500.0, 101.0), (600.0, 201.0)]);
+        assert_eq!(
+            curve.points,
+            vec![(400.0, 1.0), (500.0, 101.0), (600.0, 201.0)]
+        );
         assert_eq!(
             curve.metadata.get("batch").map(String::as_str),
             Some("test image — whole image")

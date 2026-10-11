@@ -147,7 +147,8 @@ fn render_corpus_node(
     }
 
     let all_ids = node.all_curves();
-    let mut whole_subtree_included = !all_ids.is_empty() && all_ids.iter().all(|&id| is_included(id));
+    let mut whole_subtree_included =
+        !all_ids.is_empty() && all_ids.iter().all(|&id| is_included(id));
     let plural = if all_ids.len() == 1 { "" } else { "s" };
     let header = format!("{} ({} curve{plural})", node.name, all_ids.len());
 
@@ -233,7 +234,10 @@ mod tests {
 
     #[test]
     fn ungrouped_curves_are_singleton_nodes() {
-        let app = app_with_curves(vec![curve_with_batch("a", None), curve_with_batch("b", None)]);
+        let app = app_with_curves(vec![
+            curve_with_batch("a", None),
+            curve_with_batch("b", None),
+        ]);
         let tree = corpus_tree(&app, &accept_all);
         assert_eq!(tree.len(), 2);
         assert!(tree.iter().all(|n| !n.is_named_group));
@@ -296,14 +300,11 @@ mod tests {
 
     #[test]
     fn filter_excludes_curves_and_drops_empty_nodes() {
-        let app = app_with_curves(vec![
-            curve_with_batch("a", Some("Forest")),
-            {
-                let mut c = curve_with_batch("absorb", Some("Forest"));
-                c.quantity = QuantityKind::Absorption;
-                c
-            },
-        ]);
+        let app = app_with_curves(vec![curve_with_batch("a", Some("Forest")), {
+            let mut c = curve_with_batch("absorb", Some("Forest"));
+            c.quantity = QuantityKind::Absorption;
+            c
+        }]);
         let not_absorption = |c: &SpectralCurve| c.quantity != QuantityKind::Absorption;
         let tree = corpus_tree(&app, &not_absorption);
         let forest = tree.iter().find(|n| n.name == "Forest").unwrap();

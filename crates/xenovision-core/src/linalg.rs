@@ -331,7 +331,11 @@ mod tests {
     #[test]
     fn symmetric_eigen_satisfies_mv_eq_lambda_v_and_is_orthonormal() {
         let cases = [
-            Mat::from_rows(&[vec![4.0, 1.0, 0.0], vec![1.0, 3.0, 1.0], vec![0.0, 1.0, 2.0]]),
+            Mat::from_rows(&[
+                vec![4.0, 1.0, 0.0],
+                vec![1.0, 3.0, 1.0],
+                vec![0.0, 1.0, 2.0],
+            ]),
             Mat::from_rows(&[
                 vec![2.0, -1.0, 0.5, 0.0],
                 vec![-1.0, 3.0, 0.2, 0.1],
@@ -350,7 +354,10 @@ mod tests {
                         "M*v != lambda*v at eigenvector {k}, component {i}"
                     );
                 }
-                assert!((norm(&vecs[k]) - 1.0).abs() < 1e-9, "eigenvector not unit norm");
+                assert!(
+                    (norm(&vecs[k]) - 1.0).abs() < 1e-9,
+                    "eigenvector not unit norm"
+                );
             }
             for i in 0..n {
                 for j in (i + 1)..n {

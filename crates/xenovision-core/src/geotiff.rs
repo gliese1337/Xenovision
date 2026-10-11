@@ -74,27 +74,27 @@ pub fn load_geotiff(path: impl AsRef<Path>) -> Result<GeoTiffCube, GeoTiffError>
 
     // PlanarConfiguration defaults to 1 (chunky) when the tag is absent,
     // per the TIFF 6.0 spec - only reject the explicit value 2 (planar).
-    let planar_config = decoder
-        .get_tag_u32(Tag::PlanarConfiguration)
-        .unwrap_or(1);
+    let planar_config = decoder.get_tag_u32(Tag::PlanarConfiguration).unwrap_or(1);
     if planar_config == 2 {
         return Err(GeoTiffError::PlanarNotSupported { path: path_str });
     }
 
-    let (width, height) = decoder.dimensions().map_err(|source| GeoTiffError::Decode {
-        path: path_str.clone(),
-        source,
-    })?;
+    let (width, height) = decoder
+        .dimensions()
+        .map_err(|source| GeoTiffError::Decode {
+            path: path_str.clone(),
+            source,
+        })?;
     // SamplesPerPixel defaults to 1 when absent, per the TIFF 6.0 spec.
-    let bands = decoder
-        .get_tag_u32(Tag::SamplesPerPixel)
-        .unwrap_or(1) as usize;
+    let bands = decoder.get_tag_u32(Tag::SamplesPerPixel).unwrap_or(1) as usize;
     let (samples, lines) = (width as usize, height as usize);
 
-    let image = decoder.read_image().map_err(|source| GeoTiffError::Decode {
-        path: path_str.clone(),
-        source,
-    })?;
+    let image = decoder
+        .read_image()
+        .map_err(|source| GeoTiffError::Decode {
+            path: path_str.clone(),
+            source,
+        })?;
     let flat = to_f32_vec(image);
 
     // Chunky storage interleaves a pixel's `bands` samples contiguously,
@@ -160,21 +160,66 @@ pub(crate) fn write_minimal_tiff(path: &Path, samples: usize, lines: usize, band
     }
     let bits_per_sample = 32u32;
     let entries = [
-        Entry { tag: 256, typ: 4, count: 1, value: samples as u32 }, // ImageWidth
-        Entry { tag: 257, typ: 4, count: 1, value: lines as u32 },   // ImageLength
-        Entry { tag: 258, typ: 3, count: 1, value: bits_per_sample }, // BitsPerSample
-        Entry { tag: 259, typ: 3, count: 1, value: 1 },              // Compression: none
-        Entry { tag: 262, typ: 3, count: 1, value: 1 },              // PhotometricInterpretation: BlackIsZero
-        Entry { tag: 273, typ: 4, count: 1, value: pixel_offset },   // StripOffsets
-        Entry { tag: 277, typ: 3, count: 1, value: bands as u32 },   // SamplesPerPixel
-        Entry { tag: 278, typ: 4, count: 1, value: lines as u32 },   // RowsPerStrip (one strip)
+        Entry {
+            tag: 256,
+            typ: 4,
+            count: 1,
+            value: samples as u32,
+        }, // ImageWidth
+        Entry {
+            tag: 257,
+            typ: 4,
+            count: 1,
+            value: lines as u32,
+        }, // ImageLength
+        Entry {
+            tag: 258,
+            typ: 3,
+            count: 1,
+            value: bits_per_sample,
+        }, // BitsPerSample
+        Entry {
+            tag: 259,
+            typ: 3,
+            count: 1,
+            value: 1,
+        }, // Compression: none
+        Entry {
+            tag: 262,
+            typ: 3,
+            count: 1,
+            value: 1,
+        }, // PhotometricInterpretation: BlackIsZero
+        Entry {
+            tag: 273,
+            typ: 4,
+            count: 1,
+            value: pixel_offset,
+        }, // StripOffsets
+        Entry {
+            tag: 277,
+            typ: 3,
+            count: 1,
+            value: bands as u32,
+        }, // SamplesPerPixel
+        Entry {
+            tag: 278,
+            typ: 4,
+            count: 1,
+            value: lines as u32,
+        }, // RowsPerStrip (one strip)
         Entry {
             tag: 279,
             typ: 4,
             count: 1,
             value: pixel_data.len() as u32,
         }, // StripByteCounts
-        Entry { tag: 339, typ: 3, count: 1, value: 3 }, // SampleFormat: IEEE float
+        Entry {
+            tag: 339,
+            typ: 3,
+            count: 1,
+            value: 3,
+        }, // SampleFormat: IEEE float
     ];
     buf.extend_from_slice(&(entries.len() as u16).to_le_bytes());
     for e in &entries {
@@ -221,7 +266,10 @@ mod tests {
     }
 
     fn assert_matches_pattern(cube: &GeoTiffCube, samples: usize, lines: usize, bands: usize) {
-        assert_eq!((cube.samples, cube.lines, cube.bands), (samples, lines, bands));
+        assert_eq!(
+            (cube.samples, cube.lines, cube.bands),
+            (samples, lines, bands)
+        );
         for b in 0..bands {
             for l in 0..lines {
                 for s in 0..samples {

@@ -200,7 +200,11 @@ fn left_rail(ui: &mut egui::Ui, app: &mut AppState) {
 /// the Stimulus Editor's own curve list isn't a multi-select checklist
 /// like the other three pickers, so it doesn't go through
 /// `stimulus_picker::render_corpus_checklist`.
-fn render_stimulus_tree(ui: &mut egui::Ui, app: &mut AppState, nodes: &[stimulus_picker::CorpusNode]) {
+fn render_stimulus_tree(
+    ui: &mut egui::Ui,
+    app: &mut AppState,
+    nodes: &[stimulus_picker::CorpusNode],
+) {
     for node in nodes {
         if !node.is_named_group {
             stimulus_row(ui, app, node.curves[0].0);
@@ -324,7 +328,10 @@ fn new_stimulus_menu(ui: &mut egui::Ui, app: &mut AppState) {
             app.stimulus_editor.derive_status.clear();
             ui.close_menu();
         }
-        if ui.button("Bulk-convert radiance to reflectance...").clicked() {
+        if ui
+            .button("Bulk-convert radiance to reflectance...")
+            .clicked()
+        {
             app.stimulus_editor.creation_mode = CreationMode::BulkDeriveReflectance;
             app.stimulus_editor.bulk_derive_selection.clear();
             app.stimulus_editor.derive_luminant = app.comparison.reference_luminant;
@@ -1425,8 +1432,7 @@ fn estimate_region_pixel_count(cube: &HyperspectralCube, region: Option<&Region>
         None => (cube.samples as f64, cube.lines as f64),
         Some(Region::Rectangle { x0, y0, x1, y1 }) => ((x1 - x0).abs(), (y1 - y0).abs()),
         Some(Region::Polygon(points)) => {
-            let (mut xmin, mut ymin, mut xmax, mut ymax) =
-                (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+            let (mut xmin, mut ymin, mut xmax, mut ymax) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
             for &(x, y) in points {
                 xmin = xmin.min(x);
                 ymin = ymin.min(y);
@@ -1509,7 +1515,12 @@ fn bulk_derive_reflectance_panel(ui: &mut egui::Ui, app: &mut AppState) {
         let Some(illum_curve) = app.luminants.get(&iid).cloned() else {
             return;
         };
-        let selected: Vec<CurveId> = app.stimulus_editor.bulk_derive_selection.iter().copied().collect();
+        let selected: Vec<CurveId> = app
+            .stimulus_editor
+            .bulk_derive_selection
+            .iter()
+            .copied()
+            .collect();
         let mut converted = Vec::new();
         let mut skipped = 0;
         for id in selected {

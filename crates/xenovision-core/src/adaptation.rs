@@ -12,7 +12,10 @@ use crate::linalg::{dot, Mat};
 /// consistent with how `pipeline::integrate_product` treats curves.
 /// `pub(crate)` so `natural_opponent`'s parametric model can reuse it
 /// rather than duplicating grid-sampling logic.
-pub(crate) fn sample_curves_on_common_grid(curves: &[SpectralCurve], step_nm: f64) -> Vec<Vec<f64>> {
+pub(crate) fn sample_curves_on_common_grid(
+    curves: &[SpectralCurve],
+    step_nm: f64,
+) -> Vec<Vec<f64>> {
     let (lo, hi) = curves
         .iter()
         .filter_map(|c| c.domain())

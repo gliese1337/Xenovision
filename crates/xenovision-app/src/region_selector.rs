@@ -107,15 +107,12 @@ pub fn region_selector(
             }
             if let (true, Some(start)) = (response.dragged(), draft.drag_start) {
                 if let Some(current) = response.interact_pointer_pos() {
-                    painter.rect_stroke(
-                        egui::Rect::from_two_pos(start, current),
-                        0.0,
-                        yellow,
-                    );
+                    painter.rect_stroke(egui::Rect::from_two_pos(start, current), 0.0, yellow);
                 }
             }
             if response.drag_stopped() {
-                if let (Some(start), Some(end)) = (draft.drag_start, response.interact_pointer_pos())
+                if let (Some(start), Some(end)) =
+                    (draft.drag_start, response.interact_pointer_pos())
                 {
                     let (x0, y0) = to_pixel(start);
                     let (x1, y1) = to_pixel(end);
@@ -158,8 +155,7 @@ pub fn region_selector(
                     )
                     .clicked()
                 {
-                    draft.region =
-                        Some(Region::Polygon(std::mem::take(&mut draft.polygon_points)));
+                    draft.region = Some(Region::Polygon(std::mem::take(&mut draft.polygon_points)));
                 }
                 if ui.button("Clear points").clicked() {
                     draft.polygon_points.clear();
@@ -227,7 +223,10 @@ mod tests {
         };
         draft.clear();
         assert!(draft.region.is_none(), "committed region cleared");
-        assert!(draft.polygon_points.is_empty(), "in-progress points cleared");
+        assert!(
+            draft.polygon_points.is_empty(),
+            "in-progress points cleared"
+        );
         assert!(draft.drag_start.is_none(), "drag anchor cleared");
     }
 }
