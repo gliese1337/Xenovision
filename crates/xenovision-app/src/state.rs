@@ -44,7 +44,7 @@ use xenovision_core::{
     fixture_library, fixtures, CurveSet as CoreCurveSet, CurveType, QuantityKind, SpectralCurve,
 };
 
-use crate::dock::{DockAction, DockLayout};
+use crate::dock::{DockAction, DockLayout, PanelId, PanelKind, Placement};
 use crate::image_library::ImageLibrary;
 use crate::plot_axis::AxisOrientation;
 use crate::undo::UndoManager;
@@ -515,10 +515,16 @@ pub struct AppState {
     pub stimulus_order: Vec<CurveId>,
     pub stimulus_editor: StimulusEditorState,
     /// Loaded image cubes, shared by the Stimulus Editor (curve extraction)
-    /// and the Image Display window (receptor renderings).
+    /// and every Image Display panel (receptor renderings).
     pub image_library: ImageLibrary,
-    /// Image Display window state (its list of saved views, load buffers).
-    pub image_display: ImageDisplayState,
+    /// One state per open Image Display panel, keyed by its [`PanelId`].
+    /// Image Display is repeatable (`PanelKind::is_multi_instance`), so several
+    /// independent panels - each with its own view list - can be open at once,
+    /// all reading the one shared `image_library`.
+    pub image_displays: HashMap<PanelId, ImageDisplayState>,
+    /// Next instance number handed out to a repeatable panel (see
+    /// `PanelId::instance`).
+    next_panel_instance: u32,
     /// Lazily-initialized wgpu compute context for the receptor renderer,
     /// shared (`Arc`) with the background render worker; `gpu_attempted`
     /// records that a probe has run (so a machine without a usable adapter
@@ -556,6 +562,67 @@ impl AppState {
         let first = self.next_id;
         self.next_id += count as u64;
         first
+    }
+
+    /// Creates a fresh, empty Image Display panel and places it (docked or
+    /// floating), returning its id.
+    pub fn new_image_display(&mut self, floating: bool) -> PanelId {
+        let id = PanelId::new(PanelKind::ImageDisplay, self.next_panel_instance);
+        self.next_panel_instance += 1;
+        self.image_displays.insert(id, ImageDisplayState::default());
+        self.dispatch_dock_action(if floating {
+            DockAction::OpenFloating(id)
+        } else {
+            DockAction::OpenDocked(id)
+        });
+        id
+    }
+
+    /// The Image Display panel a new view should go to: the first one already
+    /// open, or a newly created docked one if none is open.
+    pub fn primary_image_display(&mut self) -> PanelId {
+        if let Some(id) = self
+            .dock
+            .panels_of_kind(PanelKind::ImageDisplay)
+            .first()
+            .copied()
+        {
+            return id;
+        }
+        self.new_image_display(false)
+    }
+
+    /// Applies a dock action and keeps per-panel state consistent with the
+    /// layout: `NewInstance` allocates that panel's data, and closing a
+    /// repeatable panel drops its state (releasing its render worker).
+    pub fn dispatch_dock_action(&mut self, action: DockAction) {
+        match action {
+            DockAction::NewInstance(kind) => {
+                debug_assert!(
+                    kind.is_multi_instance(),
+                    "only repeatable panels can open another instance"
+                );
+                // Today Image Display is the only repeatable kind.
+                self.new_image_display(true);
+            }
+            other => self.dock.apply(other),
+        }
+        self.prune_detached_panels();
+    }
+
+    /// Handles a floating window's OS close button, then drops any panel state
+    /// that leaves behind (a repeatable panel closed this way is discarded).
+    pub fn dismiss_floating(&mut self, id: PanelId) {
+        self.dock.floating_window_closed(id);
+        self.prune_detached_panels();
+    }
+
+    /// Drops state for repeatable panels that are no longer docked or floating
+    /// (i.e. were closed), so their render workers are released.
+    fn prune_detached_panels(&mut self) {
+        let layout = &self.dock;
+        self.image_displays
+            .retain(|id, _| layout.placement(*id) != Placement::Hidden);
     }
 
     pub fn new() -> Self {
@@ -651,7 +718,8 @@ impl AppState {
             stimulus_order,
             stimulus_editor: StimulusEditorState::default(),
             image_library: ImageLibrary::default(),
-            image_display: ImageDisplayState::default(),
+            image_displays: HashMap::new(),
+            next_panel_instance: 0,
             gpu: None,
             gpu_attempted: false,
             dock: DockLayout::default(),

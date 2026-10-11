@@ -4,8 +4,8 @@
 //! genuinely heavy operation the GUI performs, and it scales with the
 //! image size (one receptor×band matrix multiply per pixel on the CPU; an
 //! upload/dispatch/readback round-trip on the GPU). Doing it on the UI
-//! thread stalls the whole window for the duration, so it runs on a single
-//! long-lived worker thread instead:
+//! thread stalls the whole window for the duration, so it runs on a
+//! long-lived worker thread instead (one per Image Display panel):
 //!
 //! - the UI thread builds a [`RenderJob`] (cheap - the precomputed
 //!   [`ReceptorKernel`] plus an `Arc` handle to the cube, no pixel copy)
@@ -15,8 +15,8 @@
 //! - the UI thread drains finished outcomes each frame and installs the
 //!   ones that still match the view's current inputs, dropping stale ones.
 //!
-//! One worker, not a pool: a single Image Display renders a handful of
-//! views that all share the one GPU context, whose receptor pool
+//! One worker per panel, not a pool: a single Image Display renders a
+//! handful of views that all share the one GPU context, whose receptor pool
 //! serializes GPU work anyway, and [`ReceptorKernel::render`] already
 //! parallelizes across pixel rows internally.
 //!

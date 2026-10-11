@@ -1,7 +1,8 @@
-//! Xenovision GUI: four panels (Workspace, Comparison, Stimulus Editor,
-//! Image Display; design doc `docs/design-doc.md`) sharing one `AppState`.
-//! The main OS window hosts any docked panels as tabs; each other panel
-//! floats in its own OS window or is hidden (see `dock`).
+//! Xenovision GUI: four panel kinds (Workspace, Comparison, Stimulus
+//! Editor, Image Display; design doc `docs/design-doc.md`) sharing one
+//! `AppState`. The main OS window hosts any docked panels as tabs; each
+//! other panel floats in its own OS window or is hidden (see `dock`). Image
+//! Display is repeatable, so several of its panels can be open at once.
 
 // Release builds on Windows are GUI programs, so no console window opens
 // alongside the app. Debug builds keep the console for log output.
@@ -23,7 +24,7 @@ mod window_image_display;
 mod window_stimulus_editor;
 mod window_workspace;
 
-use dock::{DockAction, PanelKind};
+use dock::{DockAction, PanelId, PanelKind};
 use eframe::egui;
 
 struct App {
@@ -45,18 +46,18 @@ fn min_panel_size(kind: PanelKind) -> egui::Vec2 {
 /// Draws a panel in whatever container it's in (a dock tab or its own
 /// window): normally it fills the space, but never below its minimum
 /// size - beyond that the whole panel scrolls in both directions.
-fn panel_ui(kind: PanelKind, ui: &mut egui::Ui, state: &mut state::AppState) {
-    let size = ui.available_size().max(min_panel_size(kind));
+fn panel_ui(id: PanelId, ui: &mut egui::Ui, state: &mut state::AppState) {
+    let size = ui.available_size().max(min_panel_size(id.kind));
     egui::ScrollArea::both()
-        .id_salt(("panel_scroll", kind))
+        .id_salt(("panel_scroll", id))
         .auto_shrink([false, false])
         .show(ui, |ui| {
             let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| match kind {
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| match id.kind {
                 PanelKind::Workspace => window_workspace::ui(ui, state),
                 PanelKind::Comparison => window_comparison::ui(ui, state),
                 PanelKind::StimulusEditor => window_stimulus_editor::ui(ui, state),
-                PanelKind::ImageDisplay => window_image_display::ui(ui, state),
+                PanelKind::ImageDisplay => window_image_display::ui(ui, state, id),
             });
         });
 }
@@ -92,13 +93,13 @@ impl App {
             panel_ui(self.state.dock.active, ui, &mut self.state);
         });
 
-        let mut closed: Vec<PanelKind> = Vec::new();
-        for kind in self.state.dock.floating.clone() {
+        let mut closed: Vec<PanelId> = Vec::new();
+        for id in self.state.dock.floating.clone() {
             let builder = egui::ViewportBuilder::default()
-                .with_title(format!("Xenovision - {}", kind.title()))
+                .with_title(format!("Xenovision - {}", id.title()))
                 .with_inner_size([980.0, 640.0]);
-            ctx.show_viewport_immediate(kind.viewport_id(), builder, |ctx, _class| {
-                egui::TopBottomPanel::top(egui::Id::new(("floating_dock_bar", kind))).show(
+            ctx.show_viewport_immediate(id.viewport_id(), builder, |ctx, _class| {
+                egui::TopBottomPanel::top(egui::Id::new(("floating_dock_bar", id))).show(
                     ctx,
                     |ui| {
                         if ui
@@ -106,25 +107,25 @@ impl App {
                             .on_hover_text("Merge this window into the main window as a tab")
                             .clicked()
                         {
-                            actions.push(DockAction::Dock(kind));
+                            actions.push(DockAction::Dock(id));
                         }
                     },
                 );
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    panel_ui(kind, ui, &mut self.state);
+                    panel_ui(id, ui, &mut self.state);
                 });
                 if ctx.input(|i| i.viewport().close_requested()) {
-                    closed.push(kind);
+                    closed.push(id);
                 }
             });
         }
 
         actions.append(&mut self.state.pending_dock_actions);
         for action in actions {
-            self.state.dock.apply(action);
+            self.state.dispatch_dock_action(action);
         }
-        for kind in closed {
-            self.state.dock.floating_window_closed(kind);
+        for id in closed {
+            self.state.dismiss_floating(id);
         }
     }
 }
@@ -201,36 +202,61 @@ mod layout_tests {
         );
         app.state.stimulus_editor.creation_mode = window_stimulus_editor::CreationMode::Notch;
         let ctx = egui::Context::default();
+        // Image Display is repeatable, so it needs its (first) instance state
+        // to have something to draw.
+        let img = PanelId::singleton(PanelKind::ImageDisplay);
+        app.state
+            .image_displays
+            .insert(img, window_image_display::ImageDisplayState::default());
         for kind in [
             PanelKind::Comparison,
             PanelKind::StimulusEditor,
             PanelKind::ImageDisplay,
         ] {
-            app.state.dock.apply(DockAction::OpenDocked(kind));
+            app.state
+                .dock
+                .apply(DockAction::OpenDocked(PanelId::singleton(kind)));
             run_frames(&mut app, &ctx, 1200.0, 900.0, 3);
-            assert_eq!(app.state.dock.active, kind);
+            assert_eq!(app.state.dock.active, PanelId::singleton(kind));
         }
         // Float everything except one tab (the dock can't be emptied).
+        let ws = PanelId::singleton(PanelKind::Workspace);
+        app.state.dock.apply(DockAction::Undock(ws));
         app.state
             .dock
-            .apply(DockAction::Undock(PanelKind::Workspace));
-        app.state
-            .dock
-            .apply(DockAction::Undock(PanelKind::Comparison));
+            .apply(DockAction::Undock(PanelId::singleton(PanelKind::Comparison)));
         assert_eq!(
             app.state.dock.docked,
-            vec![PanelKind::StimulusEditor, PanelKind::ImageDisplay]
+            vec![PanelId::singleton(PanelKind::StimulusEditor), img]
         );
         run_frames(&mut app, &ctx, 1200.0, 900.0, 3);
         // Requests queued from inside a panel are applied at frame end.
-        app.state
-            .pending_dock_actions
-            .push(DockAction::Dock(PanelKind::Workspace));
+        app.state.pending_dock_actions.push(DockAction::Dock(ws));
         run_frames(&mut app, &ctx, 1200.0, 900.0, 1);
-        assert_eq!(
-            app.state.dock.placement(PanelKind::Workspace),
-            dock::Placement::Docked
+        assert_eq!(app.state.dock.placement(ws), dock::Placement::Docked);
+    }
+
+    /// The repeatable kind: two Image Display panels can be open at the same
+    /// time (here both floating, in their own OS windows) with independent
+    /// view lists, reading the one shared image library.
+    #[test]
+    fn two_image_display_panels_open_simultaneously() {
+        let mut app = App::default();
+        let ctx = egui::Context::default();
+        let a = app.state.new_image_display(false);
+        let b = app.state.new_image_display(true);
+        assert_ne!(a, b);
+        app.state.dock.apply(DockAction::Undock(a));
+        run_frames(&mut app, &ctx, 1000.0, 700.0, 3);
+        assert_eq!(app.state.dock.placement(a), dock::Placement::Floating);
+        assert_eq!(app.state.dock.placement(b), dock::Placement::Floating);
+        assert_ne!(
+            a.viewport_id(),
+            b.viewport_id(),
+            "each panel needs its own OS viewport id"
         );
+        assert!(app.state.image_displays.contains_key(&a));
+        assert!(app.state.image_displays.contains_key(&b));
     }
 
     /// With every species and stimulus selected, the cross-species table
@@ -241,7 +267,7 @@ mod layout_tests {
         let mut app = App::default();
         app.state
             .dock
-            .apply(DockAction::OpenDocked(PanelKind::Comparison));
+            .apply(DockAction::OpenDocked(PanelId::singleton(PanelKind::Comparison)));
         app.state.comparison.selected_species = app.state.workspace.open_tabs.clone();
         app.state.comparison.selected_stimuli = app.state.stimulus_order.clone();
         let ctx = egui::Context::default();
@@ -287,7 +313,9 @@ mod layout_tests {
             PanelKind::StimulusEditor,
             PanelKind::ImageDisplay,
         ] {
-            app.state.dock.apply(DockAction::OpenDocked(kind));
+            app.state
+                .dock
+                .apply(DockAction::OpenDocked(PanelId::singleton(kind)));
             run_frames(&mut app, &ctx, 400.0, 300.0, 3);
         }
     }

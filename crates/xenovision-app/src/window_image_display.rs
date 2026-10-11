@@ -15,8 +15,10 @@
 //!
 //! Stage-aware defaults: raw/adapted stages show one monochrome panel per
 //! receptor (a viridis-like ramp, per-channel min–max), while the
-//! perceptual stage shows a single `[L, C1, C2]` composite through an
-//! L\*a\*b\*-style encoder. Any stage can instead be shown as an explicit
+//! perceptual stage shows a single `[L, C_a, C_b]` composite through an
+//! L\*a\*b\*-style encoder. The two chroma axes default to `C1`/`C2` but are
+//! selectable, so a regime with more than three receptors can represent any
+//! pair of its chroma axes. Any stage can instead be shown as an explicit
 //! channel→R/G/B composite.
 
 use std::collections::HashMap;
@@ -28,6 +30,7 @@ use xenovision_core::hyperspectral::{HyperspectralCube, Region};
 use xenovision_core::{ChannelStage, InputKind, ReceptorImage, ReceptorKernel, SpectralCurve};
 
 use crate::colormap::{self, Colormap};
+use crate::dock::{DockAction, PanelId};
 use crate::image_library::{self, region_label, ImageLibrary, ImageSource, ImageSourceId};
 use crate::region_selector::{region_selector, RegionDraft};
 use crate::render_worker::{RenderEngine, RenderJob, RenderOutcome, RenderProduct};
@@ -47,10 +50,22 @@ pub enum DisplayMode {
 /// Which combined image a `DisplayMode::Composite` view draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Composite {
-    /// `[L, C1, C2]` through the L\*a\*b\*-style encoder.
-    Perceptual,
+    /// `[L, C_a, C_b]` through the L\*a\*b\*-style encoder: channel 0 drives
+    /// lightness, channel `chroma_a` drives green↔magenta, and channel
+    /// `chroma_b` drives blue↔yellow. Both chroma axes are selectable so a
+    /// regime with more than three receptors can represent any pair of its
+    /// `N-1` chroma axes.
+    Perceptual { chroma_a: usize, chroma_b: usize },
     /// Three chosen channels into R/G/B.
     Rgb { r: usize, g: usize, b: usize },
+}
+
+impl Composite {
+    /// The default perceptual mapping: `C1`→green/magenta, `C2`→blue/yellow.
+    pub const PERCEPTUAL: Composite = Composite::Perceptual {
+        chroma_a: 1,
+        chroma_b: 2,
+    };
 }
 
 /// Which region a view renders.
@@ -82,6 +97,10 @@ pub struct ImageView {
     pub colormap: Colormap,
     pub step_nm: f64,
 
+    /// The display mapping (`(display, composite, colormap)`) the textures in
+    /// `render` were built from. A change here rebuilds only the textures; it
+    /// does not re-render the channel data.
+    texture_mapping: Option<(DisplayMode, Composite, Colormap)>,
     render: Option<RenderedView>,
     cache_key: Option<String>,
     /// Cache key of the render currently in flight in the worker, `None`
@@ -109,6 +128,7 @@ impl ImageView {
             composite: Composite::Rgb { r: 0, g: 0, b: 0 },
             colormap: Colormap::Viridis,
             step_nm: STEP_NM,
+            texture_mapping: None,
             render: None,
             cache_key: None,
             pending: None,
@@ -147,29 +167,38 @@ impl ImageDisplayState {
 // Seeding / adding views
 // ---------------------------------------------------------------------------
 
-/// Adds a view seeded from `source_id` (and, when provided, `region`), with
-/// defaults chosen for the currently-open visual system. Returns the new
-/// view's index.
+/// Adds a view seeded from `source_id` (and, when provided, `region`) to the
+/// Image Display panel `panel`, with defaults chosen for the currently-open
+/// visual system. Returns the new view's index.
 pub fn seed_view(
     app: &mut AppState,
+    panel: PanelId,
     source_id: Option<ImageSourceId>,
     region: Option<Region>,
 ) -> usize {
-    let id = app.image_display.alloc_view_id();
+    // Gather everything that reads shared state *before* borrowing the panel,
+    // so the two borrows never overlap.
+    let set_id = default_set(app);
+    let luminant = app.comparison.reference_luminant;
+    let title = source_id
+        .and_then(|sid| app.image_library.get(sid))
+        .map(|s| s.label.clone());
+    let state = app
+        .image_displays
+        .get_mut(&panel)
+        .expect("target Image Display panel must exist");
+    let id = state.alloc_view_id();
     let mut view = ImageView::new(id, source_id);
-    view.set_id = default_set(app);
-    view.luminant = app.comparison.reference_luminant;
+    view.set_id = set_id;
+    view.luminant = luminant;
     if let Some(r) = region {
         view.draft.region = Some(r);
         view.region = Some(view.draft.region.clone().unwrap());
         view.region_choice = RegionChoice::Custom;
     }
-    view.title = source_id
-        .and_then(|sid| app.image_library.get(sid))
-        .map(|s| s.label.clone())
-        .unwrap_or_else(|| format!("View {id}"));
-    app.image_display.views.push(view);
-    app.image_display.views.len() - 1
+    view.title = title.unwrap_or_else(|| format!("View {id}"));
+    state.views.push(view);
+    state.views.len() - 1
 }
 
 fn default_set(app: &AppState) -> Option<CurveSetId> {
@@ -180,16 +209,16 @@ fn default_set(app: &AppState) -> Option<CurveSetId> {
         .or_else(|| app.curve_sets.keys().copied().min())
 }
 
-/// The button in the Stimulus Editor: opens the Image Display docked and
-/// seeds a view from the currently selected image + region.
+/// The button in the Stimulus Editor: opens (or reuses) an Image Display
+/// panel and seeds a view from the currently selected image + region.
 pub fn seed_from_editor(app: &mut AppState) {
+    let panel = app.primary_image_display();
     let source = app.image_library.selected_id();
     let region = app.stimulus_editor.selection.region.clone();
-    seed_view(app, source, region);
-    app.pending_dock_actions
-        .push(crate::dock::DockAction::OpenDocked(
-            crate::dock::PanelKind::ImageDisplay,
-        ));
+    seed_view(app, panel, source, region);
+    // Bring the panel forward when it is docked (a floating one is already
+    // visible, and `Activate` is a no-op for it).
+    app.pending_dock_actions.push(DockAction::Activate(panel));
 }
 
 // ---------------------------------------------------------------------------
@@ -224,11 +253,12 @@ fn dominant_index(kernels: &[ReceptorKernel]) -> usize {
 }
 
 /// Builds a view's cache key: changes exactly when any input that affects
-/// the rendered pixels changes.
+/// the rendered pixels changes. The display mapping (colormap, composite,
+/// chroma axes) is deliberately *not* part of it - it only changes the
+/// textures, which are rebuilt without a worker round-trip (see `mapping`).
 fn view_key(view: &ImageView, source: &ImageSource, set_revision: u64) -> String {
     format!(
-        "src={} gen={} region={} kind={:?} lum={:?} set={:?} rev={} regime={:?} stage={:?} \
-         display={:?} composite={:?} colormap={:?} step={}",
+        "src={} gen={} region={} kind={:?} lum={:?} set={:?} rev={} regime={:?} stage={:?} step={}",
         source.id,
         source.generation,
         region_sig(&view.region),
@@ -238,11 +268,16 @@ fn view_key(view: &ImageView, source: &ImageSource, set_revision: u64) -> String
         set_revision,
         view.regime,
         view.stage,
-        view.display,
-        view.composite,
-        view.colormap,
         view.step_nm,
     )
+}
+
+/// The display mapping that turns rendered channels into the shown textures,
+/// as opposed to the inputs in `view_key`, which change the channels
+/// themselves. When this changes, `render_pass` rebuilds the textures from
+/// the channels already in hand.
+fn mapping(view: &ImageView) -> (DisplayMode, Composite, Colormap) {
+    (view.display, view.composite, view.colormap)
 }
 
 fn stage_label(stage: ChannelStage) -> &'static str {
@@ -255,7 +290,7 @@ fn stage_label(stage: ChannelStage) -> &'static str {
 
 /// Selects a view's stage and applies its stage-aware display default: raw
 /// and adapted stages each produce one channel per receptor, so they show one
-/// panel per channel; the perceptual stage shows a single `[L, C1, C2]`
+/// panel per channel; the perceptual stage shows a single `[L, C_a, C_b]`
 /// composite. (An explicit channel→R/G/B composite remains available at any
 /// stage.)
 fn apply_stage(view: &mut ImageView, stage: ChannelStage) {
@@ -263,7 +298,7 @@ fn apply_stage(view: &mut ImageView, stage: ChannelStage) {
     match stage {
         ChannelStage::Perceptual => {
             view.display = DisplayMode::Composite;
-            view.composite = Composite::Perceptual;
+            view.composite = Composite::PERCEPTUAL;
         }
         ChannelStage::RawReceptor | ChannelStage::AdaptedReceptor => {
             view.display = DisplayMode::Channels;
@@ -274,15 +309,19 @@ fn apply_stage(view: &mut ImageView, stage: ChannelStage) {
 /// One frame's render bookkeeping for every view: install any finished
 /// worker renders, then dispatch the views whose inputs changed. Called
 /// before drawing; the heavy pixel work itself happens off-thread.
-fn render_pass(ctx: &egui::Context, app: &mut AppState) {
+fn render_pass(ctx: &egui::Context, app: &mut AppState, id: PanelId) {
     let AppState {
-        image_display,
+        image_displays,
         image_library,
         curve_sets,
         luminants,
         gpu,
         ..
     } = app;
+
+    let Some(image_display) = image_displays.get_mut(&id) else {
+        return; // the panel was closed
+    };
 
     // Band previews (for region drawing) - cheap, one band each.
     for view in &image_display.views {
@@ -313,6 +352,21 @@ fn render_pass(ctx: &egui::Context, app: &mut AppState) {
         );
     }
 
+    // A display-only change (colormap, composite, or which chroma axes the
+    // composite encodes) reuses the channels already rendered: rebuild the
+    // textures here instead of round-tripping the worker. This is also what
+    // makes picking chroma axes instant on a large cube.
+    for view in views.iter_mut() {
+        if view.render.is_none() || view.texture_mapping == Some(mapping(view)) {
+            continue;
+        }
+        if let Some(mut rendered) = view.render.take() {
+            rendered.textures = build_textures(ctx, view, &rendered.image);
+            view.render = Some(rendered);
+            view.texture_mapping = Some(mapping(view));
+        }
+    }
+
     // egui is reactive by default: with no input, it would stop painting
     // and the finished render would not be collected until the next event.
     // Keep the loop ticking while any job is in flight so results land
@@ -340,6 +394,7 @@ fn install_outcome(ctx: &egui::Context, outcome: RenderOutcome, views: &mut [Ima
                 textures,
                 used_gpu,
             });
+            view.texture_mapping = Some(mapping(view));
             view.error = None;
             view.cache_key = Some(outcome.key);
         }
@@ -361,8 +416,8 @@ fn dispatch_view(
     gpu: Option<&Arc<GpuContext>>,
     engine: &RenderEngine,
 ) {
-    // The perceptual composite encodes the perceptual stage's [L, C1, C2]; at
-    // any other (effective) stage - including a regime-less pool, which is
+    // The perceptual composite encodes the perceptual stage's [L, C_a, C_b];
+    // at any other (effective) stage - including a regime-less pool, which is
     // always rendered raw - fall back to a channel→R/G/B composite so a stale
     // choice can never paint a mislabelled image.
     let regime_less = view
@@ -375,7 +430,9 @@ fn dispatch_view(
     } else {
         view.stage
     };
-    if effective_stage != ChannelStage::Perceptual && view.composite == Composite::Perceptual {
+    if effective_stage != ChannelStage::Perceptual
+        && matches!(view.composite, Composite::Perceptual { .. })
+    {
         view.composite = Composite::Rgb { r: 0, g: 1, b: 2 };
     }
 
@@ -538,15 +595,19 @@ fn composite_color_image(image: &ReceptorImage, comp: Composite) -> egui::ColorI
             continue;
         }
         let color = match comp {
-            Composite::Perceptual if n_channels >= 3 => {
+            Composite::Perceptual { chroma_a, chroma_b } if n_channels >= 3 => {
+                // Channels are [L, C1..C_(N-1)]; clamp the selected chroma
+                // axes in case the render shown is momentarily stale.
+                let ia = chroma_a.clamp(1, n_channels - 1);
+                let ib = chroma_b.clamp(1, n_channels - 1);
                 let l = colormap::normalize_unit(channel(0).unwrap()[i], range[0].0, range[0].1);
                 let c1 =
-                    colormap::normalize_opponent(channel(1).unwrap()[i], range[1].0, range[1].1);
+                    colormap::normalize_opponent(channel(ia).unwrap()[i], range[ia].0, range[ia].1);
                 let c2 =
-                    colormap::normalize_opponent(channel(2).unwrap()[i], range[2].0, range[2].1);
+                    colormap::normalize_opponent(channel(ib).unwrap()[i], range[ib].0, range[ib].1);
                 colormap::perceptual_lab(l, c1, c2)
             }
-            Composite::Perceptual => egui::Color32::BLACK,
+            Composite::Perceptual { .. } => egui::Color32::BLACK,
             Composite::Rgb { r, g, b } => {
                 let idx = |c: usize| c.min(n_channels - 1);
                 let get = |c: usize| {
@@ -569,102 +630,144 @@ fn composite_color_image(image: &ReceptorImage, comp: Composite) -> egui::ColorI
 // UI
 // ---------------------------------------------------------------------------
 
-/// The panel entry point (`PanelKind::ImageDisplay`).
-pub fn ui(ui: &mut egui::Ui, app: &mut AppState) {
+/// The panel entry point (`PanelKind::ImageDisplay`) for the instance `id`.
+pub fn ui(ui: &mut egui::Ui, app: &mut AppState, id: PanelId) {
     if !app.gpu_attempted {
         app.gpu = xenovision_core::gpu::try_init().map(Arc::new);
         app.gpu_attempted = true;
     }
 
-    egui::SidePanel::left("image_display_rail")
+    // The rail id is per-instance so several Image Display panels don't share
+    // a remembered width.
+    egui::SidePanel::left(egui::Id::new(("image_display_rail", id)))
         .resizable(true)
         .default_width(260.0)
         .show_inside(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| rail(ui, app));
+            egui::ScrollArea::vertical().show(ui, |ui| rail(ui, app, id));
         });
     egui::CentralPanel::default().show_inside(ui, |ui| {
-        egui::ScrollArea::vertical().show(ui, |ui| center(ui, app));
+        egui::ScrollArea::vertical().show(ui, |ui| center(ui, app, id));
     });
 }
 
-fn rail(ui: &mut egui::Ui, app: &mut AppState) {
-    ui.heading("Image Display");
+fn rail(ui: &mut egui::Ui, app: &mut AppState, id: PanelId) {
     let gpu_text = match (&app.gpu, app.gpu_attempted) {
         (Some(_), _) => "GPU: wgpu adapter available",
         (None, true) => "GPU: unavailable — CPU fallback",
         (None, false) => "GPU: not probed yet",
     };
-    ui.label(gpu_text);
 
-    ui.separator();
-    ui.label("Load an ENVI (point at the .hdr), GeoTIFF, or .mat file:");
-    ui.horizontal(|ui| {
-        ui.text_edit_singleline(&mut app.image_display.load_path);
-    });
-    if ui.button("Load image").clicked() {
-        let path = app.image_display.load_path.clone();
-        match xenovision_core::hyperspectral::load_envi_or_geotiff(&path) {
-            Ok(cube) => {
-                let label = source_label_from_path(&path);
-                app.image_library.add(ImageSource::new(label, path, cube));
-                app.image_display.load_status = "Loaded.".to_string();
-            }
-            Err(e) => app.image_display.load_status = format!("Load failed: {e}"),
-        }
-    }
-    if !app.image_display.load_status.is_empty() {
-        ui.label(&app.image_display.load_status);
-    }
-
-    ui.separator();
-    ui.label(format!(
-        "Loaded images ({})",
-        app.image_library.sources.len()
-    ));
-    let mut to_select: Option<ImageSourceId> = None;
-    let mut to_remove: Option<ImageSourceId> = None;
-    for source in &app.image_library.sources {
-        ui.horizontal(|ui| {
-            let selected = app.image_library.selected_id() == Some(source.id);
-            if ui
-                .selectable_label(selected, image_library::source_label(source))
-                .clicked()
-            {
-                to_select = Some(source.id);
-            }
-            if ui.small_button("✕").on_hover_text("Unload image").clicked() {
-                to_remove = Some(source.id);
-            }
-        });
-    }
-    if let Some(id) = to_select {
-        app.image_library.select(id);
-    }
-    if let Some(id) = to_remove {
-        app.image_library.remove(id);
-        for view in &mut app.image_display.views {
-            if view.source == Some(id) {
-                view.source = None;
-                view.region = None;
-            }
-        }
-    }
-    if let Some(selected) = app.image_library.selected() {
-        ui.label(format!("Selected: {}", selected.label));
-    }
-
-    ui.separator();
-    if ui
-        .add_enabled(
-            app.image_library.selected_id().is_some(),
-            egui::Button::new("+ Add view for selected image"),
-        )
-        .clicked()
+    // Actions that need the whole `AppState` (creating a panel, or seeding a
+    // view) are recorded here and run once the panel/library borrows end.
+    let mut add_selected = false;
+    let mut add_blank = false;
+    let mut new_window = false;
     {
-        seed_view(app, app.image_library.selected_id(), None);
+        let AppState {
+            image_displays,
+            image_library,
+            ..
+        } = app;
+        let Some(state) = image_displays.get_mut(&id) else {
+            return; // the panel was closed
+        };
+
+        ui.heading(id.title());
+        ui.label(gpu_text);
+
+        ui.separator();
+        ui.label("Load an ENVI (point at the .hdr), GeoTIFF, or .mat file:");
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut state.load_path);
+        });
+        if ui.button("Load image").clicked() {
+            let path = state.load_path.clone();
+            match xenovision_core::hyperspectral::load_envi_or_geotiff(&path) {
+                Ok(cube) => {
+                    let label = source_label_from_path(&path);
+                    image_library.add(ImageSource::new(label, path, cube));
+                    state.load_status = "Loaded.".to_string();
+                }
+                Err(e) => state.load_status = format!("Load failed: {e}"),
+            }
+        }
+        if !state.load_status.is_empty() {
+            ui.label(&state.load_status);
+        }
+
+        ui.separator();
+        ui.label(format!("Loaded images ({})", image_library.sources.len()));
+        let mut to_select: Option<ImageSourceId> = None;
+        let mut to_remove: Option<ImageSourceId> = None;
+        for source in &image_library.sources {
+            ui.horizontal(|ui| {
+                let selected = image_library.selected_id() == Some(source.id);
+                if ui
+                    .selectable_label(selected, image_library::source_label(source))
+                    .clicked()
+                {
+                    to_select = Some(source.id);
+                }
+                if ui.small_button("✕").on_hover_text("Unload image").clicked() {
+                    to_remove = Some(source.id);
+                }
+            });
+        }
+        if let Some(sid) = to_select {
+            image_library.select(sid);
+        }
+        if let Some(sid) = to_remove {
+            image_library.remove(sid);
+            for view in &mut state.views {
+                if view.source == Some(sid) {
+                    view.source = None;
+                    view.region = None;
+                }
+            }
+        }
+        if let Some(selected) = image_library.selected() {
+            ui.label(format!("Selected: {}", selected.label));
+        }
+
+        ui.separator();
+        if ui
+            .add_enabled(
+                image_library.selected_id().is_some(),
+                egui::Button::new("+ Add view for selected image"),
+            )
+            .on_hover_text("Add the selected image to this panel")
+            .clicked()
+        {
+            add_selected = true;
+        }
+        if ui
+            .button("+ Add blank view")
+            .on_hover_text("Start an empty view here and pick its image on the right")
+            .clicked()
+        {
+            add_blank = true;
+        }
+        if ui
+            .button("＋ New Image Display window")
+            .on_hover_text(
+                "Open another independent panel as its own window; every panel shares \
+                 the loaded images",
+            )
+            .clicked()
+        {
+            new_window = true;
+        }
     }
-    if ui.button("+ Add blank view").clicked() {
-        seed_view(app, None, None);
+
+    if new_window {
+        app.new_image_display(true);
+    }
+    if add_selected {
+        let source = app.image_library.selected_id();
+        seed_view(app, id, source, None);
+    }
+    if add_blank {
+        seed_view(app, id, None, None);
     }
 }
 
@@ -675,8 +778,13 @@ fn source_label_from_path(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
-fn center(ui: &mut egui::Ui, app: &mut AppState) {
-    if app.image_display.views.is_empty() {
+fn center(ui: &mut egui::Ui, app: &mut AppState, id: PanelId) {
+    let empty = app
+        .image_displays
+        .get(&id)
+        .map(|s| s.views.is_empty())
+        .unwrap_or(true);
+    if empty {
         ui.label(
             "No views yet. Load an image on the left, then \"+ Add view for selected image\".",
         );
@@ -686,19 +794,22 @@ fn center(ui: &mut egui::Ui, app: &mut AppState) {
     // Install finished background renders and dispatch any whose inputs
     // changed, before drawing them this frame.
     let ctx = ui.ctx().clone();
-    render_pass(&ctx, app);
+    render_pass(&ctx, app, id);
 
     let AppState {
-        image_display,
+        image_displays,
         image_library,
         curve_sets,
         luminants,
         ..
     } = app;
+    let Some(state) = image_displays.get_mut(&id) else {
+        return; // the panel was closed
+    };
 
     let mut remove: Option<usize> = None;
     let mut duplicate: Option<usize> = None;
-    for (i, view) in image_display.views.iter_mut().enumerate() {
+    for (i, view) in state.views.iter_mut().enumerate() {
         draw_view(
             ui,
             i,
@@ -711,20 +822,20 @@ fn center(ui: &mut egui::Ui, app: &mut AppState) {
         );
     }
     if let Some(i) = duplicate {
-        let mut copy = ImageView::new(image_display.alloc_view_id(), image_display.views[i].source);
-        copy.set_id = image_display.views[i].set_id;
-        copy.luminant = image_display.views[i].luminant;
-        copy.input_kind = image_display.views[i].input_kind;
-        copy.stage = image_display.views[i].stage;
-        copy.display = image_display.views[i].display;
-        copy.composite = image_display.views[i].composite;
-        copy.colormap = image_display.views[i].colormap;
-        copy.region = image_display.views[i].region.clone();
-        copy.title = format!("{} (copy)", image_display.views[i].title);
-        image_display.views.push(copy);
+        let mut copy = ImageView::new(state.alloc_view_id(), state.views[i].source);
+        copy.set_id = state.views[i].set_id;
+        copy.luminant = state.views[i].luminant;
+        copy.input_kind = state.views[i].input_kind;
+        copy.stage = state.views[i].stage;
+        copy.display = state.views[i].display;
+        copy.composite = state.views[i].composite;
+        copy.colormap = state.views[i].colormap;
+        copy.region = state.views[i].region.clone();
+        copy.title = format!("{} (copy)", state.views[i].title);
+        state.views.push(copy);
     }
     if let Some(i) = remove {
-        image_display.views.remove(i);
+        state.views.remove(i);
     }
 }
 
@@ -1094,16 +1205,16 @@ fn display_settings(ui: &mut egui::Ui, view: &mut ImageView) {
         DisplayMode::Composite => {
             ui.horizontal(|ui| {
                 ui.label("Composite:");
-                // The perceptual composite encodes [L, C1, C2], which only the
-                // perceptual stage produces; the R/G/B composite works on any
-                // channels, so it is always offered.
+                // The perceptual composite encodes [L, C_a, C_b], which only
+                // the perceptual stage produces; the R/G/B composite works on
+                // any channels, so it is always offered.
                 if view.stage == ChannelStage::Perceptual {
-                    let is_perceptual = view.composite == Composite::Perceptual;
+                    let is_perceptual = matches!(view.composite, Composite::Perceptual { .. });
                     if ui
-                        .selectable_label(is_perceptual, "perceptual (L,C1,C2)")
+                        .selectable_label(is_perceptual, "perceptual (L, chroma)")
                         .clicked()
                     {
-                        view.composite = Composite::Perceptual;
+                        view.composite = Composite::PERCEPTUAL;
                     }
                 }
                 let is_rgb = matches!(view.composite, Composite::Rgb { .. });
@@ -1111,6 +1222,29 @@ fn display_settings(ui: &mut egui::Ui, view: &mut ImageView) {
                     view.composite = Composite::Rgb { r: 0, g: 1, b: 2 };
                 }
             });
+            if let Composite::Perceptual { chroma_a, chroma_b } = view.composite {
+                // The number of chroma axes comes from the finished render
+                // (every stage of a regime has the same channel count, so
+                // `N-1` chroma axes for `N` channels). Until it lands, the
+                // defaults `C1`/`C2` apply.
+                let n_channels = view
+                    .render
+                    .as_ref()
+                    .map(|r| r.image.channels.len())
+                    .unwrap_or(0);
+                if n_channels >= 3 {
+                    let n_chroma = n_channels - 1;
+                    ui.horizontal(|ui| {
+                        ui.label("Chroma axes:");
+                        let a = chroma_axis_combo(ui, "green/magenta", chroma_a, n_chroma);
+                        let b = chroma_axis_combo(ui, "blue/yellow", chroma_b, n_chroma);
+                        view.composite = Composite::Perceptual {
+                            chroma_a: a,
+                            chroma_b: b,
+                        };
+                    });
+                }
+            }
             if let Composite::Rgb { r, g, b } = &mut view.composite {
                 ui.horizontal(|ui| {
                     channel_index_picker(ui, "R", r);
@@ -1120,6 +1254,21 @@ fn display_settings(ui: &mut egui::Ui, view: &mut ImageView) {
             }
         }
     }
+}
+
+/// A dropdown over a regime's chroma axes (`C1..C{n_chroma}`). Returns the
+/// selected axis (clamped into range) for the perceptual composite to encode.
+fn chroma_axis_combo(ui: &mut egui::Ui, role: &str, value: usize, n_chroma: usize) -> usize {
+    let mut chosen = value.clamp(1, n_chroma);
+    ui.label(role);
+    egui::ComboBox::from_id_salt(("chroma_axis", role))
+        .selected_text(format!("C{chosen}"))
+        .show_ui(ui, |ui| {
+            for c in 1..=n_chroma {
+                ui.selectable_value(&mut chosen, c, format!("C{c}"));
+            }
+        });
+    chosen
 }
 
 fn channel_index_picker(ui: &mut egui::Ui, label: &str, value: &mut usize) {
@@ -1290,9 +1439,18 @@ fn channel_legend(view: &ImageView, image: &ReceptorImage) -> String {
 
 fn composite_legend(view: &ImageView, image: &ReceptorImage) -> String {
     match view.composite {
-        Composite::Perceptual => {
-            "Composite: L→lightness, C1→green/magenta, C2→blue/yellow · per-channel range"
-                .to_string()
+        Composite::Perceptual { chroma_a, chroma_b } => {
+            // Match `composite_color_image`'s clamping so the legend always
+            // names the axes actually encoded.
+            let n_chroma = image.channels.len().saturating_sub(1);
+            let (a, b) = if n_chroma >= 1 {
+                (chroma_a.clamp(1, n_chroma), chroma_b.clamp(1, n_chroma))
+            } else {
+                (chroma_a, chroma_b)
+            };
+            format!(
+                "Composite: L→lightness, C{a}→green/magenta, C{b}→blue/yellow · per-channel range"
+            )
         }
         Composite::Rgb { r, g, b } => {
             let name = |c: usize| {
@@ -1322,10 +1480,10 @@ mod tests {
     /// view pending, so `pending == None` with a result means it is settled -
     /// this is what makes a *re*-render (old result still on screen) wait
     /// too, rather than returning on the stale result.
-    fn render_now(app: &mut AppState, ctx: &egui::Context, idx: usize) {
+    fn render_now(app: &mut AppState, ctx: &egui::Context, panel: PanelId, idx: usize) {
         for _ in 0..10_000 {
-            render_pass(ctx, app);
-            let view = &app.image_display.views[idx];
+            render_pass(ctx, app, panel);
+            let view = &app.image_displays[&panel].views[idx];
             if view.pending.is_none() && (view.render.is_some() || view.error.is_some()) {
                 return;
             }
@@ -1382,15 +1540,16 @@ mod tests {
         let id = app
             .image_library
             .add(ImageSource::new("synthetic", "synthetic", cube));
-        let idx = seed_view(&mut app, Some(id), None);
+        let panel = app.new_image_display(false);
+        let idx = seed_view(&mut app, panel, Some(id), None);
         // Raw receptor stage: one panel per channel.
-        app.image_display.views[idx].stage = ChannelStage::RawReceptor;
-        app.image_display.views[idx].display = DisplayMode::Channels;
+        app.image_displays.get_mut(&panel).unwrap().views[idx].stage = ChannelStage::RawReceptor;
+        app.image_displays.get_mut(&panel).unwrap().views[idx].display = DisplayMode::Channels;
 
         let ctx = egui::Context::default();
-        render_now(&mut app, &ctx, idx);
+        render_now(&mut app, &ctx, panel, idx);
 
-        let view = &app.image_display.views[idx];
+        let view = &app.image_displays[&panel].views[idx];
         assert!(view.error.is_none(), "render error: {:?}", view.error);
         let rendered = view.render.as_ref().expect("a render exists");
         assert!(!rendered.image.channels.is_empty(), "no channels rendered");
@@ -1423,20 +1582,21 @@ mod tests {
         let id = app
             .image_library
             .add(ImageSource::new("synthetic", "synthetic", cube));
-        let idx = seed_view(&mut app, Some(id), None);
+        let panel = app.new_image_display(false);
+        let idx = seed_view(&mut app, panel, Some(id), None);
 
         let ctx = egui::Context::default();
-        render_pass(&ctx, &mut app);
+        render_pass(&ctx, &mut app, panel);
         // The frame that first sees changed inputs must submit to the worker
         // and mark the view pending; the result arrives on a later frame.
         assert!(
-            app.image_display.views[idx].pending.is_some(),
+            app.image_displays[&panel].views[idx].pending.is_some(),
             "dispatch should mark the view pending"
         );
-        assert!(app.image_display.views[idx].render.is_none());
+        assert!(app.image_displays[&panel].views[idx].render.is_none());
 
-        render_now(&mut app, &ctx, idx);
-        assert!(app.image_display.views[idx].render.is_some());
+        render_now(&mut app, &ctx, panel, idx);
+        assert!(app.image_displays[&panel].views[idx].render.is_some());
     }
 
     /// Changing an input invalidates the cache and re-renders; leaving the
@@ -1458,22 +1618,23 @@ mod tests {
         let id = app
             .image_library
             .add(ImageSource::new("synthetic", "synthetic", cube));
-        let idx = seed_view(&mut app, Some(id), None);
+        let panel = app.new_image_display(false);
+        let idx = seed_view(&mut app, panel, Some(id), None);
         let ctx = egui::Context::default();
 
-        render_now(&mut app, &ctx, idx);
-        let key1 = app.image_display.views[idx].cache_key.clone();
+        render_now(&mut app, &ctx, panel, idx);
+        let key1 = app.image_displays[&panel].views[idx].cache_key.clone();
         assert!(key1.is_some());
 
         // Same inputs: pumping again is a no-op (cache hit, nothing pending).
-        render_pass(&ctx, &mut app);
-        assert_eq!(app.image_display.views[idx].cache_key, key1);
-        assert!(app.image_display.views[idx].pending.is_none());
+        render_pass(&ctx, &mut app, panel);
+        assert_eq!(app.image_displays[&panel].views[idx].cache_key, key1);
+        assert!(app.image_displays[&panel].views[idx].pending.is_none());
 
         // Flipping the input interpretation changes the key.
-        app.image_display.views[idx].input_kind = InputKind::Radiance;
-        render_now(&mut app, &ctx, idx);
-        assert_ne!(app.image_display.views[idx].cache_key, key1);
+        app.image_displays.get_mut(&panel).unwrap().views[idx].input_kind = InputKind::Radiance;
+        render_now(&mut app, &ctx, panel, idx);
+        assert_ne!(app.image_displays[&panel].views[idx].cache_key, key1);
     }
 
     /// An outcome whose key no longer matches the view's pending key is
@@ -1551,7 +1712,7 @@ mod tests {
 
         apply_stage(&mut view, ChannelStage::Perceptual);
         assert_eq!(view.display, DisplayMode::Composite);
-        assert_eq!(view.composite, Composite::Perceptual);
+        assert_eq!(view.composite, Composite::PERCEPTUAL);
 
         // Returning to raw goes back to one panel per channel.
         apply_stage(&mut view, ChannelStage::RawReceptor);
@@ -1578,21 +1739,132 @@ mod tests {
         let id = app
             .image_library
             .add(ImageSource::new("synthetic", "synthetic", cube));
-        let idx = seed_view(&mut app, Some(id), None);
+        let panel = app.new_image_display(false);
+        let idx = seed_view(&mut app, panel, Some(id), None);
         {
-            let view = &mut app.image_display.views[idx];
+            let view = &mut app.image_displays.get_mut(&panel).unwrap().views[idx];
             view.stage = ChannelStage::RawReceptor;
             view.display = DisplayMode::Composite;
-            view.composite = Composite::Perceptual;
+            view.composite = Composite::PERCEPTUAL;
         }
 
         let ctx = egui::Context::default();
-        render_pass(&ctx, &mut app);
+        render_pass(&ctx, &mut app, panel);
 
         assert_eq!(
-            app.image_display.views[idx].composite,
+            app.image_displays[&panel].views[idx].composite,
             Composite::Rgb { r: 0, g: 1, b: 2 },
             "off-stage perceptual composite should degrade to channel→RGB"
+        );
+    }
+
+    /// Selecting different chroma axes is a display-only change: it must feed
+    /// the texture mapping, yet it must *not* invalidate the render key (which
+    /// would force a full re-render of a potentially huge cube just to change
+    /// a color assignment).
+    #[test]
+    fn chroma_selection_is_display_only() {
+        use crate::image_library::ImageSource;
+        use xenovision_core::hyperspectral::HyperspectralCube;
+
+        let source = ImageSource::new(
+            "synthetic",
+            "synthetic",
+            HyperspectralCube::from_band_major(
+                1,
+                1,
+                3,
+                Some(vec![450.0, 550.0, 650.0]),
+                vec![0.5f32; 3],
+                "synthetic",
+            ),
+        );
+
+        let mut view = ImageView::new(1, Some(source.id));
+        let base_key = view_key(&view, &source, 0);
+        view.composite = Composite::PERCEPTUAL;
+        let base_mapping = mapping(&view);
+
+        // A different chroma pair changes the mapping ...
+        view.composite = Composite::Perceptual {
+            chroma_a: 1,
+            chroma_b: 3,
+        };
+        assert_ne!(
+            mapping(&view),
+            base_mapping,
+            "the chosen chroma axes must feed the textures"
+        );
+        // ... but not the render key: the channel data is unchanged.
+        assert_eq!(
+            view_key(&view, &source, 0),
+            base_key,
+            "a display-only change must not force a re-render"
+        );
+
+        // A change that does alter the pixels still invalidates the key.
+        view.stage = ChannelStage::Perceptual;
+        assert_ne!(view_key(&view, &source, 0), base_key);
+    }
+
+    /// The whole point of the repeatable panel: two Image Display windows keep
+    /// independent view lists over the one shared library, and closing one
+    /// discards only its own state.
+    #[test]
+    fn separate_panels_keep_separate_views() {
+        use crate::image_library::ImageSource;
+        use xenovision_core::hyperspectral::HyperspectralCube;
+
+        let mut app = crate::state::AppState::new();
+        let cube = HyperspectralCube::from_band_major(
+            2,
+            2,
+            3,
+            Some(vec![450.0, 550.0, 650.0]),
+            vec![0.5f32; 12],
+            "synthetic",
+        );
+        let id = app
+            .image_library
+            .add(ImageSource::new("synthetic", "synthetic", cube));
+
+        let a = app.new_image_display(false);
+        let b = app.new_image_display(true);
+        assert_ne!(a, b, "each new panel gets its own id");
+        seed_view(&mut app, a, Some(id), None);
+        seed_view(&mut app, b, Some(id), None);
+        seed_view(&mut app, b, None, None);
+
+        assert_eq!(app.image_displays[&a].views.len(), 1);
+        assert_eq!(app.image_displays[&b].views.len(), 2);
+        // The library is shared, not duplicated per panel.
+        assert_eq!(app.image_library.sources.len(), 1);
+
+        // Closing b drops only b's state (and its render worker).
+        app.dispatch_dock_action(DockAction::Close(b));
+        assert!(app.image_displays.contains_key(&a));
+        assert!(!app.image_displays.contains_key(&b));
+        assert_eq!(app.image_displays[&a].views.len(), 1);
+    }
+
+    /// `primary_image_display` reuses an open panel if there is one (so the
+    /// Stimulus Editor's "Show channels" button doesn't spawn a new window on
+    /// every click) and creates one only when none is open.
+    #[test]
+    fn primary_image_display_reuses_then_creates() {
+        let mut app = crate::state::AppState::new();
+        let first = app.primary_image_display();
+        assert_eq!(
+            app.primary_image_display(),
+            first,
+            "an open panel is reused, not duplicated"
+        );
+        let second = app.new_image_display(true);
+        assert_ne!(first, second);
+        assert_eq!(
+            app.primary_image_display(),
+            first,
+            "the first open panel stays primary"
         );
     }
 }
