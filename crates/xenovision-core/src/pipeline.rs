@@ -13,7 +13,7 @@
 use crate::adaptation::{derive_adaptation_matrix, AdaptationResult};
 use crate::curve::{operating_gain, DEFAULT_ILLUMINATION_SOFTNESS, SpectralCurve};
 use crate::curve_set::RegimeConfig;
-use crate::linalg::{self, dot, norm};
+use crate::linalg::{self, dot, norm, Mat};
 
 /// Raw receptor activation `Q = ∫ S(λ)·I(λ) dλ` (§2.2.2), via trapezoidal
 /// integration over the union of `a` and `b`'s domains, treating each
@@ -378,8 +378,47 @@ impl Pipeline {
         self.chroma_axes.len()
     }
 
+    /// This regime's luminance-weight coefficient row, in member order -
+    /// the row `coordinates` projects adapted activations onto for `L`.
+    pub fn luminance_weights(&self) -> &[f64] {
+        &self.luminance_weights
+    }
+
+    /// This regime's chroma axes (each a coefficient row in member
+    /// order), orthogonalized against luminance and each other.
+    /// `chroma_axis_count` is just `chroma_axes().len()`.
+    pub fn chroma_axes(&self) -> &[Vec<f64>] {
+        &self.chroma_axes
+    }
+
     pub fn noise(&self) -> Option<&[f64]> {
         self.noise.as_deref()
+    }
+
+    /// The composed adaptation map `A` such that `Q' = A·Q` turns raw
+    /// (post-gain, post-saturation) activations into adapted activations
+    /// in one matrix multiply - the linear equivalent of
+    /// [`Pipeline::adapt`]'s `M⁻¹·diag(1/(M·q_env))·M`, precomputed so
+    /// callers that adapt many stimuli at once (the receptor-image
+    /// renderers) pay the per-channel setup once per build instead of
+    /// once per stimulus.
+    pub fn adaptation_transform(&self) -> Mat {
+        let n = self.adaptation.matrix.n;
+        let aq_env = self.adaptation.matrix.mul_vec(&self.q_env);
+        // diag(1/aq_env), where a near-zero environment channel maps to
+        // 1.0 (no scaling) - matching `adapt`'s per-element guard.
+        let mut scaled = Mat::zeros(n);
+        for (i, &e) in aq_env.iter().enumerate() {
+            let s = if e.abs() < 1e-12 {
+                1.0
+            } else {
+                1.0 / e
+            };
+            for j in 0..n {
+                scaled.set(i, j, s * self.adaptation.matrix.get(i, j));
+            }
+        }
+        self.adaptation.inverse.mul_mat(&scaled)
     }
 
     /// Adapted receptor activations `Q'` for raw activations `q`, via the
@@ -388,14 +427,7 @@ impl Pipeline {
     /// inverse of its response to the reference illuminant, transform
     /// back.
     fn adapt(&self, q: &[f64]) -> Vec<f64> {
-        let aq_env = self.adaptation.matrix.mul_vec(&self.q_env);
-        let aq = self.adaptation.matrix.mul_vec(q);
-        let scaled: Vec<f64> = aq
-            .iter()
-            .zip(aq_env.iter())
-            .map(|(&v, &e)| if e.abs() < 1e-12 { v } else { v / e })
-            .collect();
-        self.adaptation.inverse.mul_vec(&scaled)
+        self.adaptation_transform().mul_vec(q)
     }
 
     /// Adapted receptor activations `Q'` for a stimulus spectrum - the

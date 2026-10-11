@@ -60,6 +60,12 @@ impl Mat {
         (0..self.n).map(|i| dot(self.row(i), v)).collect()
     }
 
+    /// The matrix's `n*n` values in row-major order, for callers that
+    /// need to flatten it (e.g. uploading it to a GPU storage buffer).
+    pub fn data(&self) -> &[f64] {
+        &self.data
+    }
+
     pub fn mul_mat(&self, other: &Mat) -> Mat {
         assert_eq!(self.n, other.n);
         let n = self.n;

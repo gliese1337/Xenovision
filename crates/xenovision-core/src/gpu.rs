@@ -1,10 +1,20 @@
-//! GPU compute (wgpu) for batched adaptation-objective evaluations.
+//! Pooled wgpu compute for the core library's two batched workloads.
 //!
-//! **Currently unused.** `adaptation` used to route its finite-difference
-//! evaluations here for N > 16, but its exact-gradient CPU method is now
-//! faster at every size measured, so nothing calls this module. It's kept
-//! as a working wgpu setup for future GPU work (e.g. rendering a whole
-//! hyperspectral image as a given species would see it).
+//! **1. The receptor-image renderer (active).** `render_receptors` renders
+//! every pixel of a hyperspectral cube (or region) through a
+//! [`ReceptorKernel`](crate::receptor_image::ReceptorKernel) in one
+//! dispatch: per-pixel band-summed receptor activation, gating, saturation
+//! cap, the composed von Kries adaptation map, and the regime's opponent
+//! output rows - exactly the CPU path in
+//! [`ReceptorKernel::render`](crate::receptor_image::ReceptorKernel::render),
+//! batched as pixel per invocation. Dispatches larger than 65535 workgroups
+//! are split across the dispatch's y dimension (see `render_receptors`).
+//!
+//! **2. The adaptation-objective batch (currently unused).** `adaptation`
+//! used to route its finite-difference evaluations here for N > 16, but
+//! its exact-gradient CPU method is now faster at every size measured, so
+//! nothing calls that path. It's kept as a second working wgpu setup
+//! sharing the same pooling scheme as the receptor path.
 //!
 //! Measured with `bench_cpu_vs_gpu_overlap_sum` (`cargo test -p
 //! xenovision-core --release -- --ignored --nocapture` to reproduce):
@@ -36,10 +46,11 @@
 //! further left), but the exact-gradient CPU method keeps the GPU off the
 //! critical path either way.
 //!
-//! Known limitation before reusing it: each pass is one 1-D dispatch, so
-//! batches larger than 65535 workgroups (reached around N≈20 for the
-//! adaptation batch) exceed wgpu's per-dimension limit and panic instead
-//! of returning `None`. Split large dispatches across dimensions or calls.
+//! Known limitation of the adaptation-objective pass: it is one 1-D
+//! dispatch, so batches larger than 65535 workgroups (reached around N≈20
+//! for the adaptation batch) exceed wgpu's per-dimension limit and panic
+//! instead of returning `None`. The receptor renderer does not share this -
+//! it splits such dispatches across the y dimension (`render_receptors`).
 //!
 //! `try_init` returns `None` if no compute-capable adapter is available
 //! or setup fails, so callers can always fall back to the CPU.
@@ -60,6 +71,8 @@
 //! case and against the CPU path directly - see `tests` below.
 
 use std::sync::Mutex;
+
+use crate::receptor_image::{ReceptorKernel, MAX_GPU_RECEPTORS};
 
 const SHADER_SRC: &str = r#"
 struct Params {
@@ -147,6 +160,100 @@ fn overlap_batch(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// The receptor-image renderer's compute shader: one invocation renders one
+/// pixel, mirroring `ReceptorKernel::render`'s CPU per-pixel math exactly
+/// (band-summed raw activations, gating, saturation cap, the composed von
+/// Kries adaptation map, and the regime's opponent rows). All non-pixel
+/// inputs (`response`, `gains`, `caps`, `adaptation`, `opponent`) are
+/// kernel-level constants, so one pipeline serves every stage and regime -
+/// each dispatch just swaps which buffers are bound.
+///
+/// The pixel index is `gid.y * PIXELS_PER_SLICE + gid.x` (a "slice" is
+/// `64 * 65535 = 4,194,240` pixels - the largest one 1-D dispatch can
+/// cover), so `render_receptors`' 2-D dispatch keeps every supported image
+/// inside wgpu's 65535-workgroup-per-dimension limit.
+const RECEPTOR_SHADER_SRC: &str = r#"
+const PIXELS_PER_SLICE: u32 = 64u * 65535u;
+
+struct RParams {
+    n_bands: u32,
+    n_receptors: u32,
+    n_out: u32,
+    n_pixels: u32,
+    has_adaptation: u32,
+    has_opponent: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+
+@group(0) @binding(0) var<uniform> params: RParams;
+@group(0) @binding(1) var<storage, read> cube: array<f32>;
+@group(0) @binding(2) var<storage, read> response: array<f32>;
+@group(0) @binding(3) var<storage, read> gains: array<f32>;
+// Caps as (present, value) pairs per receptor, so a genuine cap of 0.0 is
+// distinguishable from "no cap".
+@group(0) @binding(4) var<storage, read> caps: array<f32>;
+@group(0) @binding(5) var<storage, read> adaptation: array<f32>;
+@group(0) @binding(6) var<storage, read> opponent: array<f32>;
+@group(0) @binding(7) var<storage, read_write> rout: array<f32>;
+
+// Per-invocation scratch (private storage class is per-invocation), sized
+// for the kernel's receptor ceiling.
+var<private> raw: array<f32, 64>;
+var<private> q: array<f32, 64>;
+
+@compute @workgroup_size(64)
+fn receptor_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let p: u32 = gid.y * PIXELS_PER_SLICE + gid.x;
+    if (p >= params.n_pixels) {
+        return;
+    }
+    let n_rep: u32 = min(params.n_receptors, 64u);
+
+    // Raw activation, gating, saturation cap - `Q_i` per receptor.
+    for (var r: u32 = 0u; r < n_rep; r = r + 1u) {
+        var acc: f32 = 0.0;
+        let resp_base: u32 = r * params.n_bands;
+        for (var b: u32 = 0u; b < params.n_bands; b = b + 1u) {
+            acc = acc + response[resp_base + b] * cube[b * params.n_pixels + p];
+        }
+        var gated: f32 = acc * gains[r];
+        if (caps[r * 2u] > 0.5 && gated > caps[r * 2u + 1u]) {
+            gated = caps[r * 2u + 1u];
+        }
+        raw[r] = gated;
+        q[r] = gated;
+    }
+
+    // Composed von Kries map `Q' = A·Q` (row-major N x N), when the
+    // kernel carries one.
+    if (params.has_adaptation == 1u) {
+        for (var i: u32 = 0u; i < n_rep; i = i + 1u) {
+            var acc: f32 = 0.0;
+            for (var j: u32 = 0u; j < n_rep; j = j + 1u) {
+                acc = acc + adaptation[i * n_rep + j] * raw[j];
+            }
+            q[i] = acc;
+        }
+    }
+
+    // Opponent rows `[L, C1..]`, or the plain (adapted) receptor channels.
+    if (params.has_opponent == 1u) {
+        for (var c: u32 = 0u; c < params.n_out; c = c + 1u) {
+            var acc: f32 = 0.0;
+            for (var i: u32 = 0u; i < n_rep; i = i + 1u) {
+                acc = acc + opponent[c * n_rep + i] * q[i];
+            }
+            rout[c * params.n_pixels + p] = acc;
+        }
+    } else {
+        for (var c: u32 = 0u; c < n_rep; c = c + 1u) {
+            rout[c * params.n_pixels + p] = q[c];
+        }
+    }
+}
+"#;
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Params {
@@ -158,6 +265,20 @@ struct Params {
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
+}
+
+/// Uniform payload for `RECEPTOR_SHADER_SRC`'s `receptor_main`.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct RParams {
+    n_bands: u32,
+    n_receptors: u32,
+    n_out: u32,
+    n_pixels: u32,
+    has_adaptation: u32,
+    has_opponent: u32,
+    _pad0: u32,
+    _pad1: u32,
 }
 
 fn alloc_buffer(
@@ -335,16 +456,214 @@ impl Pool {
     }
 }
 
+/// GPU buffers reused across `render_receptors` calls (same pooling scheme
+/// as [`Pool`]). The cube contents still change per call, but input size
+/// and the kernel-level buffers (`response`/`gains`/`caps`/`adaptation`/
+/// `opponent`) change only with kernel shape, so a steady stream of
+/// same-shape renders reuses every buffer. `caps` needs `2*N` values (a
+/// (present, value) pair per receptor), hence its own field.
+struct ReceptorPool {
+    params: wgpu::Buffer,
+    cube: wgpu::Buffer,
+    cube_cap: u64,
+    response: wgpu::Buffer,
+    response_cap: u64,
+    gains: wgpu::Buffer,
+    gains_cap: u64,
+    caps: wgpu::Buffer,
+    caps_cap: u64,
+    adaptation: wgpu::Buffer,
+    adaptation_cap: u64,
+    opponent: wgpu::Buffer,
+    opponent_cap: u64,
+    rout: wgpu::Buffer,
+    rout_cap: u64,
+    readback: wgpu::Buffer,
+    readback_cap: u64,
+    bg: wgpu::BindGroup,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_receptor_bind_group(
+    ctx: &GpuContext,
+    params: &wgpu::Buffer,
+    cube: &wgpu::Buffer,
+    response: &wgpu::Buffer,
+    gains: &wgpu::Buffer,
+    caps: &wgpu::Buffer,
+    adaptation: &wgpu::Buffer,
+    opponent: &wgpu::Buffer,
+    rout: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("receptor_bg"),
+        layout: &ctx.receptor_pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: params.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: cube.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: response.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: gains.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: caps.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: adaptation.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: opponent.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: rout.as_entire_binding(),
+            },
+        ],
+    })
+}
+
+impl ReceptorPool {
+    /// An all-minimum-size pool (`adaptation`/`opponent` get a 4-byte
+    /// placeholder when their kernel lacks them; the shader never reads a
+    /// disabled buffer, and any missing binding would trip validation, so a
+    /// dummy is required either way).
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        ctx: &GpuContext,
+        cube: u64,
+        response: u64,
+        gains: u64,
+        caps: u64,
+        adaptation: u64,
+        opponent: u64,
+        rout: u64,
+    ) -> ReceptorPool {
+        let params = alloc_buffer(
+            &ctx.device,
+            "receptor_params",
+            std::mem::size_of::<RParams>() as u64,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
+        let cube_cap = pooled_capacity(cube);
+        let cube_buf = alloc_buffer(
+            &ctx.device,
+            "receptor_cube",
+            cube_cap,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let response_cap = pooled_capacity(response);
+        let response_buf = alloc_buffer(
+            &ctx.device,
+            "receptor_response",
+            response_cap,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let gains_cap = pooled_capacity(gains);
+        let gains_buf = alloc_buffer(
+            &ctx.device,
+            "receptor_gains",
+            gains_cap,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let caps_cap = pooled_capacity(caps);
+        let caps_buf = alloc_buffer(
+            &ctx.device,
+            "receptor_caps",
+            caps_cap,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let adaptation_cap = pooled_capacity(adaptation);
+        let adaptation_buf = alloc_buffer(
+            &ctx.device,
+            "receptor_adaptation",
+            adaptation_cap,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let opponent_cap = pooled_capacity(opponent);
+        let opponent_buf = alloc_buffer(
+            &ctx.device,
+            "receptor_opponent",
+            opponent_cap,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let rout_cap = pooled_capacity(rout);
+        let rout_buf = alloc_buffer(
+            &ctx.device,
+            "receptor_rout",
+            rout_cap,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
+        let readback_cap = pooled_capacity(rout);
+        let readback_buf = alloc_buffer(
+            &ctx.device,
+            "receptor_readback",
+            readback_cap,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+
+        let bg = make_receptor_bind_group(
+            ctx,
+            &params,
+            &cube_buf,
+            &response_buf,
+            &gains_buf,
+            &caps_buf,
+            &adaptation_buf,
+            &opponent_buf,
+            &rout_buf,
+        );
+        ReceptorPool {
+            params,
+            cube: cube_buf,
+            cube_cap,
+            response: response_buf,
+            response_cap,
+            gains: gains_buf,
+            gains_cap,
+            caps: caps_buf,
+            caps_cap,
+            adaptation: adaptation_buf,
+            adaptation_cap,
+            opponent: opponent_buf,
+            opponent_cap,
+            rout: rout_buf,
+            rout_cap,
+            readback: readback_buf,
+            readback_cap,
+            bg,
+        }
+    }
+}
+
 pub struct GpuContext {
     device: wgpu::Device,
     queue: wgpu::Queue,
     transform_pipeline: wgpu::ComputePipeline,
     overlap_pipeline: wgpu::ComputePipeline,
+    /// The receptor-image renderer's pipeline (one shader for every stage/
+    /// regime - only the bind buffers change per call).
+    receptor_pipeline: wgpu::ComputePipeline,
     /// Lazily built on the first `overlap_sum_batch`, then reused. `Mutex`
     /// (not `RefCell`) so `GpuContext` stays `Sync` for callers that might
     /// share it; calls are serialized through it either way, which is what
     /// a single command stream wants anyway.
     pool: Mutex<Option<Pool>>,
+    /// Lazily built on the first `render_receptors`, then reused (same
+    /// `Mutex`-shared scheme as `pool`).
+    receptor_pool: Mutex<Option<ReceptorPool>>,
 }
 
 /// Tries to find a compute-capable GPU adapter and build the two
@@ -389,12 +708,27 @@ pub fn try_init() -> Option<GpuContext> {
         cache: None,
     });
 
+    let receptor_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("receptor_render"),
+        source: wgpu::ShaderSource::Wgsl(RECEPTOR_SHADER_SRC.into()),
+    });
+    let receptor_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("receptor_render"),
+        layout: None,
+        module: &receptor_module,
+        entry_point: Some("receptor_main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
     Some(GpuContext {
         device,
         queue,
         transform_pipeline,
         overlap_pipeline,
+        receptor_pipeline,
         pool: Mutex::new(None),
+        receptor_pool: Mutex::new(None),
     })
 }
 
@@ -578,6 +912,254 @@ impl GpuContext {
                             .sum::<f64>()
                     })
                     .collect::<Vec<f64>>()
+            }
+            Err(_) => return None,
+        };
+        // Unmap so the pooled readback buffer is reusable next call.
+        pool.readback.unmap();
+        Some(out)
+    }
+
+    /// Renders a whole pixel block through `kernel` in one compute
+    /// dispatch: the channel-major result of
+    /// [`ReceptorKernel::render`](crate::receptor_image::ReceptorKernel::render)
+    /// (`n_channels * n_pixels` f32 values, channel-major). `cube_region`
+    /// is the block's band-major pixel spectra (`n_bands * n_pixels` f32
+    /// values) - for a whole-image render this is exactly
+    /// `HyperspectralCube::data()`, which is why the CPU gather is skipped
+    /// in that case.
+    ///
+    /// Dispatches are split across the y dimension so images larger than
+    /// `64 * 65535 = 4,194,240` pixels stay inside wgpu's 65535-workgroup
+    /// per-dimension limit (a 2049×2048 image - 4,196,352 pixels - is the
+    /// smallest such case). `None` on any GPU-side failure; callers fall
+    /// back to the CPU.
+    pub fn render_receptors(
+        &self,
+        kernel: &ReceptorKernel,
+        cube_region: &[f32],
+        n_pixels: usize,
+    ) -> Option<Vec<f32>> {
+        let n_bands = kernel.n_bands();
+        let n_receptors = kernel.n_receptors();
+        let n_out = kernel.n_out();
+        if n_receptors == 0 || n_pixels == 0 || n_bands == 0 {
+            return Some(Vec::new());
+        }
+        if n_receptors > MAX_GPU_RECEPTORS {
+            return None;
+        }
+
+        // Kernel-level constants, flattened to f32 payloads. `caps` is one
+        // (present, value) pair per receptor so a genuine cap of 0.0
+        // renders correctly (None -> [0.0, 0.0]).
+        let response_f32: Vec<f32> = kernel.response().iter().map(|&v| v as f32).collect();
+        let gains_f32: Vec<f32> = kernel.gains().iter().map(|&v| v as f32).collect();
+        let caps_f32: Vec<f32> = kernel
+            .caps()
+            .iter()
+            .flat_map(|c| match c {
+                Some(v) => vec![1.0, *v as f32],
+                None => vec![0.0, 0.0],
+            })
+            .collect();
+        let adaptation_f32: Vec<f32> = kernel
+            .adaptation_mat()
+            .map(|m| m.data().iter().map(|&v| v as f32).collect())
+            .unwrap_or_default();
+        let opponent_f32: Vec<f32> = kernel
+            .opponent_rows()
+            .map(|rows| rows.iter().flatten().map(|&v| v as f32).collect())
+            .unwrap_or_default();
+
+        let params = RParams {
+            n_bands: n_bands as u32,
+            n_receptors: n_receptors as u32,
+            n_out: n_out as u32,
+            n_pixels: n_pixels as u32,
+            has_adaptation: u32::from(kernel.adaptation_mat().is_some()),
+            has_opponent: u32::from(kernel.opponent_rows().is_some()),
+            _pad0: 0,
+            _pad1: 0,
+        };
+
+        let bytes = |len: usize| len as u64 * 4;
+        let cube_bytes = bytes(cube_region.len());
+        let response_bytes = bytes(response_f32.len());
+        let gains_bytes = bytes(gains_f32.len());
+        let caps_bytes = bytes(caps_f32.len());
+        let adaptation_bytes = bytes(adaptation_f32.len());
+        let opponent_bytes = bytes(opponent_f32.len());
+        let rout_bytes = bytes(n_out * n_pixels);
+
+        let mut guard = self.receptor_pool.lock().unwrap();
+        if guard.is_none() {
+            *guard = Some(ReceptorPool::new(
+                self,
+                cube_bytes,
+                response_bytes,
+                gains_bytes,
+                caps_bytes,
+                adaptation_bytes.max(4),
+                opponent_bytes.max(4),
+                rout_bytes,
+            ));
+        }
+        let pool = guard.as_mut().unwrap();
+
+        // Grow whichever buffers this call's shape needs, and rebuild the
+        // bind group whenever any handle it captures is (re)allocated.
+        let mut rebuild = false;
+        if pool.cube_cap < cube_bytes {
+            pool.cube_cap = pooled_capacity(cube_bytes);
+            pool.cube = alloc_buffer(
+                &self.device,
+                "receptor_cube",
+                pool.cube_cap,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            );
+            rebuild = true;
+        }
+        if pool.response_cap < response_bytes {
+            pool.response_cap = pooled_capacity(response_bytes);
+            pool.response = alloc_buffer(
+                &self.device,
+                "receptor_response",
+                pool.response_cap,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            );
+            rebuild = true;
+        }
+        if pool.gains_cap < gains_bytes {
+            pool.gains_cap = pooled_capacity(gains_bytes);
+            pool.gains = alloc_buffer(
+                &self.device,
+                "receptor_gains",
+                pool.gains_cap,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            );
+            rebuild = true;
+        }
+        if pool.caps_cap < caps_bytes {
+            pool.caps_cap = pooled_capacity(caps_bytes);
+            pool.caps = alloc_buffer(
+                &self.device,
+                "receptor_caps",
+                pool.caps_cap,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            );
+            rebuild = true;
+        }
+        if pool.adaptation_cap < adaptation_bytes.max(4) {
+            pool.adaptation_cap = pooled_capacity(adaptation_bytes.max(4));
+            pool.adaptation = alloc_buffer(
+                &self.device,
+                "receptor_adaptation",
+                pool.adaptation_cap,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            );
+            rebuild = true;
+        }
+        if pool.opponent_cap < opponent_bytes.max(4) {
+            pool.opponent_cap = pooled_capacity(opponent_bytes.max(4));
+            pool.opponent = alloc_buffer(
+                &self.device,
+                "receptor_opponent",
+                pool.opponent_cap,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            );
+            rebuild = true;
+        }
+        if pool.rout_cap < rout_bytes {
+            pool.rout_cap = pooled_capacity(rout_bytes);
+            pool.rout = alloc_buffer(
+                &self.device,
+                "receptor_rout",
+                pool.rout_cap,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            );
+            rebuild = true;
+        }
+        if pool.readback_cap < rout_bytes {
+            pool.readback_cap = pooled_capacity(rout_bytes);
+            pool.readback = alloc_buffer(
+                &self.device,
+                "receptor_readback",
+                pool.readback_cap,
+                wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            );
+            // readback is in no bind group, so it never forces a rebuild.
+        }
+        if rebuild {
+            pool.bg = make_receptor_bind_group(
+                self,
+                &pool.params,
+                &pool.cube,
+                &pool.response,
+                &pool.gains,
+                &pool.caps,
+                &pool.adaptation,
+                &pool.opponent,
+                &pool.rout,
+            );
+        }
+
+        // Only the per-call input contents are (re)uploaded.
+        self.queue
+            .write_buffer(&pool.params, 0, bytemuck::bytes_of(&params));
+        self.queue
+            .write_buffer(&pool.cube, 0, bytemuck::cast_slice(cube_region));
+        self.queue
+            .write_buffer(&pool.response, 0, bytemuck::cast_slice(&response_f32));
+        self.queue
+            .write_buffer(&pool.gains, 0, bytemuck::cast_slice(&gains_f32));
+        self.queue
+            .write_buffer(&pool.caps, 0, bytemuck::cast_slice(&caps_f32));
+        if !adaptation_f32.is_empty() {
+            self.queue
+                .write_buffer(&pool.adaptation, 0, bytemuck::cast_slice(&adaptation_f32));
+        }
+        if !opponent_f32.is_empty() {
+            self.queue
+                .write_buffer(&pool.opponent, 0, bytemuck::cast_slice(&opponent_f32));
+        }
+
+        // 2-D dispatch: x is capped at 65535 workgroups (wgpu's per-dimension
+        // limit), so each y slice covers at most 65535*64 = 4,194,240
+        // pixels - exactly what the shader's `gid.y * PIXELS_PER_SLICE`
+        // assumes - and y covers however many such slices are needed.
+        let total_wgs = (n_pixels as u64).div_ceil(64);
+        let x = total_wgs.min(65535) as u32;
+        let y = total_wgs.div_ceil(x as u64) as u32;
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(&self.receptor_pipeline);
+            pass.set_bind_group(0, &pool.bg, &[]);
+            pass.dispatch_workgroups(x, y, 1);
+        }
+        encoder.copy_buffer_to_buffer(&pool.rout, 0, &pool.readback, 0, rout_bytes);
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = pool.readback.slice(..rout_bytes);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |res| {
+            let _ = tx.send(res);
+        });
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        if rx.recv().ok()?.is_err() {
+            return None;
+        }
+        let out = match slice.get_mapped_range() {
+            Ok(mapped) => {
+                let floats: &[f32] = bytemuck::cast_slice(&mapped);
+                floats.to_vec()
             }
             Err(_) => return None,
         };

@@ -74,6 +74,44 @@ impl HyperspectralCube {
         &self.data[start..start + self.lines * self.samples]
     }
 
+    /// The cube's raw band-major storage
+    /// (`data[band*lines*samples + line*samples + sample]`) - the slice
+    /// the GPU receptor renderer uploads directly for a whole-image
+    /// render (no region), since a whole-image, no-ROI pass over the cube
+    /// is exactly this layout.
+    pub fn data(&self) -> &[f32] {
+        &self.data
+    }
+
+    /// Builds a cube from raw band-major data
+    /// (`data[band*lines*samples + line*samples + sample]`), for callers
+    /// and tests that already have cube data in hand rather than loading
+    /// it from a file. Panics (attributed to the caller) unless `data`
+    /// holds exactly `bands * lines * samples` values.
+    #[track_caller]
+    pub fn from_band_major(
+        samples: usize,
+        lines: usize,
+        bands: usize,
+        wavelengths_nm: Option<Vec<f64>>,
+        data: Vec<f32>,
+        source_label: impl Into<String>,
+    ) -> Self {
+        assert_eq!(
+            data.len(),
+            bands * lines * samples,
+            "band-major cube data must be bands*lines*samples long"
+        );
+        HyperspectralCube {
+            samples,
+            lines,
+            bands,
+            wavelengths_nm,
+            data,
+            source_label: source_label.into(),
+        }
+    }
+
     /// Assigns a wavelength axis explicitly (the GeoTIFF sensor-preset/
     /// manual-entry fallback path, §3.4.1 point 2) - `Err` if the count
     /// doesn't match the cube's band count, rather than silently
@@ -105,7 +143,9 @@ pub enum Region {
 }
 
 impl Region {
-    fn contains(&self, x: f64, y: f64) -> bool {
+    /// `true` if a point (in pixel coordinates; a pixel center is tested
+    /// as `x + 0.5, y + 0.5`) falls inside this region.
+    pub fn contains(&self, x: f64, y: f64) -> bool {
         match self {
             Region::Rectangle { x0, y0, x1, y1 } => {
                 let (xmin, xmax) = (x0.min(*x1), x0.max(*x1));
@@ -141,7 +181,7 @@ fn point_in_polygon(x: f64, y: f64, points: &[(f64, f64)]) -> bool {
 
 impl Region {
     /// Pixel-coordinate bounding box `(x_min, y_min, x_max, y_max)`.
-    fn bounds(&self) -> (f64, f64, f64, f64) {
+    pub fn bounds(&self) -> (f64, f64, f64, f64) {
         match self {
             Region::Rectangle { x0, y0, x1, y1 } => {
                 (x0.min(*x1), y0.min(*y1), x0.max(*x1), y0.max(*y1))

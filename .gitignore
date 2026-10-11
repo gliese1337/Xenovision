@@ -3,3 +3,6 @@
 /dist
 *.tar.gz
 *.zip
+
+# Downloaded hyperspectral data (untracked)
+/data
