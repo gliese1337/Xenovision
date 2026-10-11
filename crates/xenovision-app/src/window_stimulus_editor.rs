@@ -15,28 +15,30 @@
 //! The image-loading/band-preview/region-selection logic is a direct
 //! port of this app's prior single-page `ui_hyperspectral` module (and,
 //! after that, the first draft of this window) - already covered by
-//! `xenovision_core::hyperspectral`'s own tests. What's new here is
-//! everything else: the library itself (shared with Comparison via
+//! `xenovision_core::hyperspectral`'s own tests. Loaded cubes now live in
+//! the shared `ImageLibrary` (`image_library.rs`) rather than on
+//! `StimulusEditorState`, so the Image Display window can render the same
+//! image and named regions without a second load; region drawing is the
+//! shared `region_selector.rs` widget. What's new here is everything
+//! else: the library itself (shared with Comparison via
 //! `AppState::stimulus_curves`), the other creation modes, and
 //! unload-with-unsaved-changes-warning, mirroring how Workspace tabs
 //! now close.
+
+use std::sync::Arc;
 
 use eframe::egui;
 use xenovision_core::hyperspectral::{self, HyperspectralCube, MatVariableInfo, Region};
 use xenovision_core::sensor_presets::{self, SensorBandPreset};
 use xenovision_core::{illumination, CurveType, QuantityKind, SpectralCurve};
 
+use crate::image_library::{self, ImageSource, ImageSourceId};
 use crate::multi_curve_editor;
+use crate::region_selector::{region_selector, RegionDraft};
 use crate::state::{AppState, CurveId, StimulusEntry};
 use crate::stimulus_picker;
 
 const STEP_NM: f64 = 1.0;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SelectionMode {
-    Rectangle,
-    Polygon,
-}
 
 /// Which creation flow (if any) the center pane is showing instead of
 /// the normal selected-curve editor.
@@ -64,18 +66,14 @@ pub struct StimulusEditorState {
     pub image_path: String,
     pub mat_path: String,
     pub image_status: String,
-    pub cube: Option<HyperspectralCube>,
-    cube_generation: usize,
-    pub band: usize,
-    texture: Option<egui::TextureHandle>,
-    texture_key: Option<(usize, usize)>,
+    /// The in-progress rectangle/polygon region shared by the preview and
+    /// the extraction controls.
+    pub selection: RegionDraft,
+    /// Name buffer for saving the current selection as a named region.
+    pub region_name: String,
     pub mat_variables: Vec<MatVariableInfo>,
     pub mat_cube_choice: Option<usize>,
     pub mat_wavelength_choice: Option<usize>,
-    pub selection_mode: SelectionMode,
-    drag_start: Option<egui::Pos2>,
-    pub polygon_points: Vec<(f64, f64)>,
-    pub region: Option<Region>,
     pub as_illumination: bool,
     pub sensor_presets: Vec<SensorBandPreset>,
     pub sensor_preset_picker: usize,
@@ -119,18 +117,11 @@ impl Default for StimulusEditorState {
             image_path: String::new(),
             mat_path: String::new(),
             image_status: String::new(),
-            cube: None,
-            cube_generation: 0,
-            band: 0,
-            texture: None,
-            texture_key: None,
+            selection: RegionDraft::default(),
+            region_name: String::new(),
             mat_variables: Vec::new(),
             mat_cube_choice: None,
             mat_wavelength_choice: None,
-            selection_mode: SelectionMode::Rectangle,
-            drag_start: None,
-            polygon_points: Vec::new(),
-            region: None,
             as_illumination: false,
             sensor_presets: sensor_presets::load_sensor_presets(),
             sensor_preset_picker: 0,
@@ -914,73 +905,61 @@ fn band_to_color_image(cube: &HyperspectralCube, band: usize) -> egui::ColorImag
     }
 }
 
+/// Clears the region gesture after a new image is loaded or selected.
 fn reset_after_new_cube(state: &mut StimulusEditorState) {
-    state.cube_generation += 1;
-    state.band = 0;
-    state.region = None;
-    state.polygon_points.clear();
-    state.drag_start = None;
+    state.selection = RegionDraft::default();
 }
 
-fn image_import_panel(ui: &mut egui::Ui, app: &mut AppState) {
-    ui.heading("Import from image");
-    if ui.button("Done").clicked() {
-        app.stimulus_editor.creation_mode = CreationMode::None;
-    }
-    ui.separator();
-
-    let state = &mut app.stimulus_editor;
-
+/// The image-loading controls (ENVI/GeoTIFF + MATLAB `.mat`). A successful
+/// load registers a new source in the shared `ImageLibrary` and selects it.
+fn image_load_controls(ui: &mut egui::Ui, app: &mut AppState) {
     ui.label("Load an ENVI (point at the .hdr) or GeoTIFF file:");
+    let mut loaded: Option<(String, HyperspectralCube)> = None;
     ui.horizontal(|ui| {
-        ui.text_edit_singleline(&mut state.image_path);
+        ui.text_edit_singleline(&mut app.stimulus_editor.image_path);
         if ui.button("Load").clicked() {
-            match hyperspectral::load_envi_or_geotiff(&state.image_path) {
-                Ok(cube) => {
-                    let has_wavelengths = cube.wavelengths_nm.is_some();
-                    state.image_status = format!(
-                        "Loaded {}x{} pixels, {} bands{}",
-                        cube.samples,
-                        cube.lines,
-                        cube.bands,
-                        if has_wavelengths {
-                            " (wavelength metadata found)"
-                        } else {
-                            " (no wavelength metadata - assign one below before extracting)"
-                        }
-                    );
-                    state.cube = Some(cube);
-                    reset_after_new_cube(state);
-                }
-                Err(e) => state.image_status = format!("Load failed: {e}"),
+            let path = app.stimulus_editor.image_path.clone();
+            match hyperspectral::load_envi_or_geotiff(&path) {
+                Ok(cube) => loaded = Some((path, cube)),
+                Err(e) => app.stimulus_editor.image_status = format!("Load failed: {e}"),
             }
         }
     });
+    if let Some((path, cube)) = loaded {
+        register_image_source(app, path, cube);
+    }
 
     ui.separator();
     ui.label("Or load a MATLAB .mat hypercube:");
     ui.horizontal(|ui| {
-        ui.text_edit_singleline(&mut state.mat_path);
+        ui.text_edit_singleline(&mut app.stimulus_editor.mat_path);
         if ui.button("List variables").clicked() {
-            match hyperspectral::list_mat_variables(&state.mat_path) {
+            let path = app.stimulus_editor.mat_path.clone();
+            match hyperspectral::list_mat_variables(&path) {
                 Ok(vars) => {
                     let guess = hyperspectral::guess_mat_mapping(&vars);
-                    state.mat_cube_choice = guess
+                    let st = &mut app.stimulus_editor;
+                    st.mat_cube_choice = guess
                         .cube_name
                         .as_ref()
                         .and_then(|name| vars.iter().position(|v| &v.name == name));
-                    state.mat_wavelength_choice = guess
+                    st.mat_wavelength_choice = guess
                         .wavelength_name
                         .as_ref()
                         .and_then(|name| vars.iter().position(|v| &v.name == name));
-                    state.image_status = format!("Found {} variable(s)", vars.len());
-                    state.mat_variables = vars;
+                    st.image_status = format!("Found {} variable(s)", vars.len());
+                    st.mat_variables = vars;
                 }
-                Err(e) => state.image_status = format!("Failed to list variables: {e}"),
+                Err(e) => {
+                    app.stimulus_editor.image_status = format!("Failed to list variables: {e}")
+                }
             }
         }
     });
-    if !state.mat_variables.is_empty() {
+
+    let mut loaded_mat: Option<(String, String, HyperspectralCube)> = None;
+    if !app.stimulus_editor.mat_variables.is_empty() {
+        let st = &mut app.stimulus_editor;
         egui::Grid::new("mat_variables_table")
             .striped(true)
             .show(ui, |ui| {
@@ -989,97 +968,130 @@ fn image_import_panel(ui: &mut egui::Ui, app: &mut AppState) {
                 ui.label("Use as cube?");
                 ui.label("Use as wavelengths?");
                 ui.end_row();
-                for i in 0..state.mat_variables.len() {
-                    ui.label(&state.mat_variables[i].name);
-                    ui.label(format!("{:?}", state.mat_variables[i].shape));
-                    if ui.radio(state.mat_cube_choice == Some(i), "").clicked() {
-                        state.mat_cube_choice = Some(i);
+                for i in 0..st.mat_variables.len() {
+                    ui.label(&st.mat_variables[i].name);
+                    ui.label(format!("{:?}", st.mat_variables[i].shape));
+                    if ui.radio(st.mat_cube_choice == Some(i), "").clicked() {
+                        st.mat_cube_choice = Some(i);
                     }
-                    if ui
-                        .radio(state.mat_wavelength_choice == Some(i), "")
-                        .clicked()
-                    {
-                        state.mat_wavelength_choice = Some(i);
+                    if ui.radio(st.mat_wavelength_choice == Some(i), "").clicked() {
+                        st.mat_wavelength_choice = Some(i);
                     }
                     ui.end_row();
                 }
             });
         if ui.button("None (no wavelength variable)").clicked() {
-            state.mat_wavelength_choice = None;
+            st.mat_wavelength_choice = None;
         }
-        let can_load = state.mat_cube_choice.is_some();
+        let can_load = st.mat_cube_choice.is_some();
         if ui
             .add_enabled(can_load, egui::Button::new("Load selected cube"))
             .clicked()
         {
-            let cube_name = state.mat_variables[state.mat_cube_choice.unwrap()]
-                .name
-                .clone();
-            let wavelength_name = state
+            let cube_name = st.mat_variables[st.mat_cube_choice.unwrap()].name.clone();
+            let wavelength_name = st
                 .mat_wavelength_choice
-                .map(|i| state.mat_variables[i].name.clone());
-            match hyperspectral::load_mat_cube(
-                &state.mat_path,
-                &cube_name,
-                wavelength_name.as_deref(),
-            ) {
-                Ok(cube) => {
-                    state.image_status = format!(
-                        "Loaded {}x{} pixels, {} bands from \"{cube_name}\"",
-                        cube.samples, cube.lines, cube.bands
-                    );
-                    state.cube = Some(cube);
-                    reset_after_new_cube(state);
-                }
-                Err(e) => state.image_status = format!("Load failed: {e}"),
+                .map(|i| st.mat_variables[i].name.clone());
+            let path = st.mat_path.clone();
+            match hyperspectral::load_mat_cube(&path, &cube_name, wavelength_name.as_deref()) {
+                Ok(cube) => loaded_mat = Some((path, cube_name, cube)),
+                Err(e) => st.image_status = format!("Load failed: {e}"),
             }
         }
     }
-
-    if !state.image_status.is_empty() {
-        ui.label(&state.image_status);
+    if let Some((path, cube_name, cube)) = loaded_mat {
+        let has_wavelengths = cube.wavelengths_nm.is_some();
+        let (samples, lines, bands) = (cube.samples, cube.lines, cube.bands);
+        app.stimulus_editor.image_status = format!(
+            "Loaded {samples}x{lines} pixels, {bands} bands from \"{cube_name}\"{}",
+            if has_wavelengths {
+                ""
+            } else {
+                " (no wavelength metadata)"
+            }
+        );
+        let label = format!("{cube_name} ({})", short_path(&path));
+        app.image_library.add(ImageSource::new(label, path, cube));
+        reset_after_new_cube(&mut app.stimulus_editor);
     }
 
-    let Some(cube) = state.cube.as_ref() else {
+    if !app.stimulus_editor.image_status.is_empty() {
+        ui.label(&app.stimulus_editor.image_status);
+    }
+}
+
+fn short_path(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
+}
+
+/// Registers a freshly loaded cube as an image source and selects it.
+fn register_image_source(app: &mut AppState, path: String, cube: HyperspectralCube) {
+    let has_wavelengths = cube.wavelengths_nm.is_some();
+    let (samples, lines, bands) = (cube.samples, cube.lines, cube.bands);
+    app.stimulus_editor.image_status = format!(
+        "Loaded {samples}x{lines} pixels, {bands} bands{}",
+        if has_wavelengths {
+            " (wavelength metadata found)"
+        } else {
+            " (no wavelength metadata - assign one below before extracting)"
+        }
+    );
+    let label = short_path(&path);
+    app.image_library.add(ImageSource::new(label, path, cube));
+    reset_after_new_cube(&mut app.stimulus_editor);
+}
+
+/// Wavelength-axis assignment (only when a source has none) and the band
+/// preview slider, both of which edit the selected source in place.
+fn image_wavelength_controls(ui: &mut egui::Ui, app: &mut AppState, source_id: ImageSourceId) {
+    let AppState {
+        image_library,
+        stimulus_editor,
+        ..
+    } = app;
+    let Some(source) = image_library.get(source_id) else {
         return;
     };
-    let bands = cube.bands;
-    let has_wavelength_axis = cube.wavelengths_nm.is_some();
-
-    ui.separator();
+    let bands = source.cube.bands;
+    let has_wavelength_axis = source.cube.wavelengths_nm.is_some();
 
     if !has_wavelength_axis {
         ui.colored_label(
             egui::Color32::from_rgb(220, 180, 40),
             format!("⚠ No wavelength metadata for these {bands} bands - assign one before extracting a curve:"),
         );
+        let mut assign: Option<Vec<f64>> = None;
         ui.horizontal(|ui| {
             egui::ComboBox::new("sensor_preset_picker", "Sensor preset")
                 .selected_text(
-                    state
+                    stimulus_editor
                         .sensor_presets
-                        .get(state.sensor_preset_picker)
+                        .get(stimulus_editor.sensor_preset_picker)
                         .map(|p| p.name.as_str())
                         .unwrap_or("(none)"),
                 )
                 .show_ui(ui, |ui| {
-                    for (i, preset) in state.sensor_presets.iter().enumerate() {
-                        ui.selectable_value(&mut state.sensor_preset_picker, i, &preset.name);
+                    for (i, preset) in stimulus_editor.sensor_presets.iter().enumerate() {
+                        ui.selectable_value(
+                            &mut stimulus_editor.sensor_preset_picker,
+                            i,
+                            &preset.name,
+                        );
                     }
                 });
-            if let Some(preset) = state.sensor_presets.get(state.sensor_preset_picker) {
+            if let Some(preset) = stimulus_editor
+                .sensor_presets
+                .get(stimulus_editor.sensor_preset_picker)
+            {
                 let matches = preset.wavelengths_nm.len() == bands;
                 if ui
                     .add_enabled(matches, egui::Button::new("Apply preset"))
                     .clicked()
                 {
-                    let wavelengths = preset.wavelengths_nm.clone();
-                    state
-                        .cube
-                        .as_mut()
-                        .unwrap()
-                        .assign_wavelengths(wavelengths)
-                        .ok();
+                    assign = Some(preset.wavelengths_nm.clone());
                 }
                 if !matches {
                     ui.label(format!(
@@ -1091,199 +1103,226 @@ fn image_import_panel(ui: &mut egui::Ui, app: &mut AppState) {
         });
         ui.horizontal(|ui| {
             ui.label("Manual (comma-separated nm, one per band):");
-            ui.text_edit_singleline(&mut state.manual_wavelengths);
+            ui.text_edit_singleline(&mut stimulus_editor.manual_wavelengths);
             if ui.button("Apply manual").clicked() {
-                let parsed: Result<Vec<f64>, _> = state
+                let parsed: Result<Vec<f64>, _> = stimulus_editor
                     .manual_wavelengths
                     .split(',')
                     .map(|s| s.trim().parse::<f64>())
                     .collect();
                 match parsed {
-                    Ok(wavelengths) => {
-                        match state.cube.as_mut().unwrap().assign_wavelengths(wavelengths) {
-                            Ok(()) => state.image_status = "Wavelengths assigned".to_string(),
-                            Err(e) => state.image_status = format!("{e}"),
-                        }
-                    }
+                    Ok(wavelengths) => assign = Some(wavelengths),
                     Err(_) => {
-                        state.image_status = "Couldn't parse manual wavelength list".to_string()
+                        stimulus_editor.image_status =
+                            "Couldn't parse manual wavelength list".to_string()
                     }
                 }
             }
         });
+        if let Some(wavelengths) = assign {
+            if let Some(source) = image_library.get_mut(source_id) {
+                match Arc::make_mut(&mut source.cube).assign_wavelengths(wavelengths) {
+                    Ok(()) => {
+                        source.bump_generation();
+                        stimulus_editor.image_status = "Wavelengths assigned".to_string();
+                    }
+                    Err(e) => stimulus_editor.image_status = format!("{e}"),
+                }
+            }
+        }
         ui.separator();
     }
 
-    let cube = state.cube.as_ref().unwrap();
-
+    // Preview band slider (edits the source's band) + texture rebuild.
+    let mut band = image_library.get(source_id).map(|s| s.band).unwrap_or(0);
+    let mut changed = false;
     ui.horizontal(|ui| {
         ui.label("Preview band:");
-        let mut band = state.band;
-        if ui
-            .add(egui::Slider::new(
-                &mut band,
-                0..=cube.bands.saturating_sub(1),
-            ))
-            .changed()
+        changed = ui
+            .add(egui::Slider::new(&mut band, 0..=bands.saturating_sub(1)))
+            .changed();
+        if let Some(wl) = image_library
+            .get(source_id)
+            .and_then(|s| s.cube.wavelengths_nm.as_ref())
         {
-            state.band = band;
-        }
-        if let Some(wavelengths) = &cube.wavelengths_nm {
-            ui.label(format!("({:.0} nm)", wavelengths[state.band]));
+            if band < wl.len() {
+                ui.label(format!("({:.0} nm)", wl[band]));
+            }
         }
     });
-
-    ui.horizontal(|ui| {
-        ui.label("Selection shape:");
-        ui.radio_value(
-            &mut state.selection_mode,
-            SelectionMode::Rectangle,
-            "Rectangle",
-        );
-        ui.radio_value(
-            &mut state.selection_mode,
-            SelectionMode::Polygon,
-            "Polygon (click to add vertices)",
-        );
-    });
-
-    let needs_rebuild = state.texture_key != Some((state.cube_generation, state.band));
-    if needs_rebuild {
-        let image = band_to_color_image(cube, state.band);
-        let handle = ui.ctx().load_texture(
-            "hyperspectral_preview",
-            image,
-            egui::TextureOptions::NEAREST,
-        );
-        state.texture = Some(handle);
-        state.texture_key = Some((state.cube_generation, state.band));
-    }
-
-    let max_display_width = ui.available_width().min(640.0);
-    let aspect = cube.lines as f32 / cube.samples as f32;
-    let display_size = egui::vec2(max_display_width, max_display_width * aspect);
-
-    let (response, painter) = ui.allocate_painter(display_size, egui::Sense::click_and_drag());
-    if let Some(texture) = &state.texture {
-        painter.image(
-            texture.id(),
-            response.rect,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            egui::Color32::WHITE,
-        );
-    }
-
-    let to_pixel = |p: egui::Pos2| -> (f64, f64) {
-        let rel_x = ((p.x - response.rect.min.x) / response.rect.width()) as f64;
-        let rel_y = ((p.y - response.rect.min.y) / response.rect.height()) as f64;
-        (rel_x * cube.samples as f64, rel_y * cube.lines as f64)
-    };
-    let to_screen = |x: f64, y: f64| -> egui::Pos2 {
-        egui::pos2(
-            response.rect.min.x + (x / cube.samples as f64) as f32 * response.rect.width(),
-            response.rect.min.y + (y / cube.lines as f64) as f32 * response.rect.height(),
-        )
-    };
-
-    match state.selection_mode {
-        SelectionMode::Rectangle => {
-            if response.drag_started() {
-                state.drag_start = response.interact_pointer_pos();
-            }
-            if let (true, Some(start)) = (response.dragged(), state.drag_start) {
-                if let Some(current) = response.interact_pointer_pos() {
-                    painter.rect_stroke(
-                        egui::Rect::from_two_pos(start, current),
-                        0.0,
-                        egui::Stroke::new(2.0_f32, egui::Color32::YELLOW),
-                    );
-                }
-            }
-            if response.drag_stopped() {
-                if let (Some(start), Some(end)) =
-                    (state.drag_start, response.interact_pointer_pos())
-                {
-                    let (x0, y0) = to_pixel(start);
-                    let (x1, y1) = to_pixel(end);
-                    state.region = Some(Region::Rectangle { x0, y0, x1, y1 });
-                }
-                state.drag_start = None;
-            }
-            if let Some(Region::Rectangle { x0, y0, x1, y1 }) = &state.region {
-                painter.rect_stroke(
-                    egui::Rect::from_two_pos(to_screen(*x0, *y0), to_screen(*x1, *y1)),
-                    0.0,
-                    egui::Stroke::new(2.0_f32, egui::Color32::GREEN),
-                );
-            }
+    if let Some(source) = image_library.get_mut(source_id) {
+        if changed {
+            source.band = band;
         }
-        SelectionMode::Polygon => {
-            if response.clicked() {
-                if let Some(pos) = response.interact_pointer_pos() {
-                    state.polygon_points.push(to_pixel(pos));
-                }
+        let key = Some((source.generation, source.band));
+        if source.preview_key != key || source.preview.is_none() {
+            let image = band_to_color_image(&source.cube, source.band);
+            source.preview = Some(ui.ctx().load_texture(
+                "hyperspectral_preview",
+                image,
+                egui::TextureOptions::NEAREST,
+            ));
+            source.preview_key = key;
+        }
+    }
+}
+
+fn image_import_panel(ui: &mut egui::Ui, app: &mut AppState) {
+    ui.heading("Import from image");
+    if ui.button("Done").clicked() {
+        app.stimulus_editor.creation_mode = CreationMode::None;
+    }
+    ui.separator();
+
+    image_load_controls(ui, app);
+
+    // Switch between loaded images (all sources stay in the shared
+    // library; this just chooses which one the preview/extraction uses).
+    if !app.image_library.sources.is_empty() {
+        ui.horizontal(|ui| {
+            ui.label("Image:");
+            let current = app
+                .image_library
+                .selected()
+                .map(|s| s.label.clone())
+                .unwrap_or_else(|| "(none)".to_string());
+            let mut chosen: Option<ImageSourceId> = None;
+            egui::ComboBox::from_id_salt("editor_source_picker")
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    let entries: Vec<(ImageSourceId, String)> = app
+                        .image_library
+                        .sources
+                        .iter()
+                        .map(|s| (s.id, s.label.clone()))
+                        .collect();
+                    for (id, label) in entries {
+                        if ui
+                            .selectable_label(app.image_library.selected_id() == Some(id), label)
+                            .clicked()
+                        {
+                            chosen = Some(id);
+                        }
+                    }
+                });
+            if let Some(id) = chosen {
+                app.image_library.select(id);
+                reset_after_new_cube(&mut app.stimulus_editor);
             }
-            if state.polygon_points.len() >= 2 {
-                let screen_points: Vec<egui::Pos2> = state
-                    .polygon_points
-                    .iter()
-                    .map(|&(x, y)| to_screen(x, y))
-                    .collect();
-                painter.add(egui::Shape::closed_line(
-                    screen_points,
-                    egui::Stroke::new(2.0_f32, egui::Color32::YELLOW),
-                ));
-            }
-            if let Some(Region::Polygon(points)) = &state.region {
-                let screen_points: Vec<egui::Pos2> =
-                    points.iter().map(|&(x, y)| to_screen(x, y)).collect();
-                painter.add(egui::Shape::closed_line(
-                    screen_points,
-                    egui::Stroke::new(2.0_f32, egui::Color32::GREEN),
-                ));
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(
-                        state.polygon_points.len() >= 3,
-                        egui::Button::new("Close polygon"),
-                    )
-                    .clicked()
-                {
-                    state.region = Some(Region::Polygon(std::mem::take(&mut state.polygon_points)));
-                }
-                if ui.button("Clear points").clicked() {
-                    state.polygon_points.clear();
+        });
+    }
+
+    let Some(source_id) = app.image_library.selected_id() else {
+        return;
+    };
+    image_wavelength_controls(ui, app, source_id);
+
+    // Region selection + extraction read the selected source; the borrows
+    // are scoped so `add_and_select` / `seed_from_editor` can run after.
+    let (extract_region, as_illumination, show_in_display, save_request) = {
+        let AppState {
+            image_library,
+            stimulus_editor,
+            ..
+        } = app;
+        let Some(source) = image_library.get(source_id) else {
+            return;
+        };
+        let cube = &source.cube;
+        let Some(preview) = source.preview.as_ref() else {
+            ui.label("Preparing preview…");
+            return;
+        };
+
+        // Reload a previously saved region, if any.
+        if !source.regions.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Saved regions:");
+                for named in &source.regions {
+                    if ui.selectable_label(false, &named.name).clicked() {
+                        stimulus_editor.selection.region = Some(named.region.clone());
+                    }
                 }
             });
         }
+
+        region_selector(
+            ui,
+            preview,
+            cube.samples,
+            cube.lines,
+            &mut stimulus_editor.selection,
+        );
+
+        // Save the current selection as a named region (shared with the
+        // Image Display window).
+        let mut save_request: Option<(String, Region)> = None;
+        ui.horizontal(|ui| {
+            ui.label("Region name:");
+            ui.text_edit_singleline(&mut stimulus_editor.region_name);
+            let name = stimulus_editor.region_name.trim().to_string();
+            let can_save = stimulus_editor.selection.region.is_some() && !name.is_empty();
+            if ui
+                .add_enabled(can_save, egui::Button::new("Save region"))
+                .clicked()
+            {
+                let region = stimulus_editor.selection.region.clone().unwrap();
+                save_request = Some((name, region));
+            }
+        });
+
+        ui.separator();
+        ui.checkbox(
+            &mut stimulus_editor.as_illumination,
+            "Extract as an Illumination/radiance curve instead of a reflectance sample",
+        );
+        let has_wavelengths = cube.wavelengths_nm.is_some();
+        let can_extract = stimulus_editor.selection.region.is_some() && has_wavelengths;
+        if !has_wavelengths {
+            ui.label("Assign a wavelength axis above before extracting.");
+        }
+        let extract_clicked = ui
+            .add_enabled(can_extract, egui::Button::new("Extract region to curve"))
+            .clicked();
+        let region = if extract_clicked {
+            stimulus_editor.selection.region.clone()
+        } else {
+            None
+        };
+        let show_in_display = ui
+            .button("Show channels in Image Display")
+            .on_hover_text(
+                "Render this image (and the current selection) through a visual system's \
+                 receptors in the Image Display window.",
+            )
+            .clicked();
+        (
+            region,
+            stimulus_editor.as_illumination,
+            show_in_display,
+            save_request,
+        )
+    };
+
+    if let Some((name, region)) = save_request {
+        if let Some(source) = app.image_library.get_mut(source_id) {
+            source.save_region(name, region);
+            app.stimulus_editor.image_status = "Region saved".to_string();
+        }
     }
 
-    ui.separator();
-    ui.checkbox(
-        &mut state.as_illumination,
-        "Extract as an Illumination/radiance curve instead of a reflectance sample",
-    );
-    let has_wavelengths = cube.wavelengths_nm.is_some();
-    let can_extract = state.region.is_some() && has_wavelengths;
-    if !has_wavelengths {
-        ui.label("Assign a wavelength axis above before extracting.");
+    if show_in_display {
+        crate::window_image_display::seed_from_editor(app);
     }
-    if ui
-        .add_enabled(can_extract, egui::Button::new("Extract region to curve"))
-        .clicked()
-    {
-        let region = state.region.clone().unwrap();
-        let region_label = match &region {
-            Region::Rectangle { x0, y0, x1, y1 } => {
-                format!("rect ({x0:.0},{y0:.0})-({x1:.0},{y1:.0})")
-            }
-            Region::Polygon(points) => format!("polygon ({} vertices)", points.len()),
-        };
-        let as_illumination = state.as_illumination;
-        match hyperspectral::extracted_curve(cube, &region, &region_label, as_illumination) {
+
+    if let Some(region) = extract_region {
+        let label = image_library::region_label(&region);
+        let extracted = app.image_library.get(source_id).and_then(|s| {
+            hyperspectral::extracted_curve(&s.cube, &region, &label, as_illumination)
+        });
+        match extracted {
             Some(curve) => {
-                state.image_status =
+                app.stimulus_editor.image_status =
                     format!("Extracted \"{}\" into the stimulus library", curve.name);
                 add_and_select(app, curve);
                 // Extraction can continue from the same loaded image, so
@@ -1301,9 +1340,9 @@ fn image_import_panel(ui: &mut egui::Ui, app: &mut AppState) {
 }
 
 /// The "extract every pixel as curves" control (§4.2.6's addendum),
-/// factored into its own re-borrow of `app.stimulus_editor`/its cube so
-/// it doesn't extend the outer `image_import_panel`'s own `state`/`cube`
-/// borrows across the `add_many(app, ...)` call this needs at the end.
+/// reading its region and cube from the shared image library so it
+/// doesn't extend the outer `image_import_panel`'s borrows across the
+/// `add_many(app, ...)` call this needs at the end.
 fn bulk_pixel_import_section(ui: &mut egui::Ui, app: &mut AppState) {
     ui.separator();
     ui.label(
@@ -1322,10 +1361,14 @@ fn bulk_pixel_import_section(ui: &mut egui::Ui, app: &mut AppState) {
         ui.label(app.stimulus_editor.pixel_import_status.clone());
     }
     let stride = app.stimulus_editor.pixel_import_stride.max(1);
-    let region = app.stimulus_editor.region.clone();
-    let Some(cube) = app.stimulus_editor.cube.as_ref() else {
+    let region = app.stimulus_editor.selection.region.clone();
+    let Some(source_id) = app.image_library.selected_id() else {
         return;
     };
+    let Some(source) = app.image_library.get(source_id) else {
+        return;
+    };
+    let cube = &source.cube;
     let has_wavelengths = cube.wavelengths_nm.is_some();
     let estimated_curves = estimate_region_pixel_count(cube, region.as_ref()).div_ceil(stride);
     ui.label(format!("~{estimated_curves} curve(s) will be created."));
@@ -1353,26 +1396,19 @@ fn bulk_pixel_import_section(ui: &mut egui::Ui, app: &mut AppState) {
     }
 
     let region_label = match &region {
-        Some(Region::Rectangle { x0, y0, x1, y1 }) => {
-            format!("rect ({x0:.0},{y0:.0})-({x1:.0},{y1:.0})")
-        }
-        Some(Region::Polygon(points)) => format!("polygon ({} vertices)", points.len()),
         None => "whole image".to_string(),
+        Some(r) => image_library::region_label(r),
     };
-    let (curves, batch_label) = {
-        let cube = app.stimulus_editor.cube.as_ref().unwrap();
-        // "/" nests these under a corpus named for the source image, with
-        // the region as a sub-corpus (stimulus_picker's hierarchy, §4.2.6).
-        let batch_label = format!("{}/{region_label}", cube.source_label);
-        let spectra = hyperspectral::extract_region_pixel_spectra(cube, region.as_ref(), stride);
-        let curves: Vec<SpectralCurve> = spectra
-            .iter()
-            .filter_map(|(line, sample, spectrum)| {
-                hyperspectral::pixel_curve(cube, *line, *sample, spectrum, &batch_label)
-            })
-            .collect();
-        (curves, batch_label)
-    };
+    // "/" nests these under a corpus named for the source image, with
+    // the region as a sub-corpus (stimulus_picker's hierarchy, §4.2.6).
+    let batch_label = format!("{}/{region_label}", cube.source_label);
+    let spectra = hyperspectral::extract_region_pixel_spectra(cube, region.as_ref(), stride);
+    let curves: Vec<SpectralCurve> = spectra
+        .iter()
+        .filter_map(|(line, sample, spectrum)| {
+            hyperspectral::pixel_curve(cube, *line, *sample, spectrum, &batch_label)
+        })
+        .collect();
     let count = curves.len();
     add_many(app, curves);
     app.stimulus_editor.pixel_import_status =

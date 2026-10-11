@@ -50,6 +50,11 @@ pub enum HyperspectralError {
 /// source metadata (ENVI's header) or explicitly assigned (GeoTIFF's
 /// sensor-preset dropdown fallback, §3.4.1 point 2) - extraction
 /// requires it to be set.
+///
+/// `Clone` is provided so callers can hold the cube behind an `Arc` and
+/// copy-on-write it (`Arc::make_mut`) when assigning a wavelength axis
+/// while a background render may still be borrowing the old data.
+#[derive(Clone)]
 pub struct HyperspectralCube {
     pub samples: usize,
     pub lines: usize,

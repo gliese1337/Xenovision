@@ -1,8 +1,8 @@
-//! Docking layout for the three top-level panels. The root OS window is
+//! Docking layout for the top-level panels. The root OS window is
 //! a dock host showing its docked panels as tabs; any panel can instead
-//! float in its own OS window, and Comparison/Stimulus Editor can also
-//! be hidden. Panel content is unaffected - each window module's `ui()`
-//! renders the same way whichever container it ends up in.
+//! float in its own OS window, and Comparison/Stimulus Editor/Image
+//! Display can also be hidden. Panel content is unaffected - each window
+//! module's `ui()` renders the same way whichever container it ends up in.
 
 use eframe::egui;
 
@@ -11,13 +11,15 @@ pub enum PanelKind {
     Workspace,
     Comparison,
     StimulusEditor,
+    ImageDisplay,
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 3] = [
+    pub const ALL: [PanelKind; 4] = [
         PanelKind::Workspace,
         PanelKind::Comparison,
         PanelKind::StimulusEditor,
+        PanelKind::ImageDisplay,
     ];
 
     pub fn title(self) -> &'static str {
@@ -25,6 +27,7 @@ impl PanelKind {
             PanelKind::Workspace => "Workspace",
             PanelKind::Comparison => "Comparison",
             PanelKind::StimulusEditor => "Stimulus Editor",
+            PanelKind::ImageDisplay => "Image Display",
         }
     }
 

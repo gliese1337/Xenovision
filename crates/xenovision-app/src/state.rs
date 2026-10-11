@@ -1,7 +1,9 @@
-//! Shared application state for the three-window redesign
-//! (`docs/gui-design-doc.md` §4): one `AppState`, read and written by
-//! all three windows (`window_workspace`, `window_comparison`,
-//! `window_stimulus_editor`), with no per-window copy of curve data.
+//! Shared application state for the windowed redesign
+//! (`docs/design-doc.md`): one `AppState`, read and written by every
+//! window (`window_workspace`, `window_comparison`,
+//! `window_stimulus_editor`, `window_image_display`), with no per-window
+//! copy of curve data (nor of loaded image cubes - those live in the
+//! shared `ImageLibrary`).
 //!
 //! Deviations from §4's Rust sketches, pragmatic rather than exact:
 //! - `Curve` is just `xenovision_core::SpectralCurve` directly (it
@@ -33,6 +35,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use xenovision_core::comparison::DistanceMetric;
 use xenovision_core::curve_set::{OpponentContrast, Regime as CoreRegime};
@@ -42,8 +45,10 @@ use xenovision_core::{
 };
 
 use crate::dock::{DockAction, DockLayout};
+use crate::image_library::ImageLibrary;
 use crate::plot_axis::AxisOrientation;
 use crate::undo::UndoManager;
+use crate::window_image_display::ImageDisplayState;
 use crate::window_stimulus_editor::StimulusEditorState;
 
 pub type CurveSetId = u64;
@@ -509,6 +514,17 @@ pub struct AppState {
     pub stimulus_curves: HashMap<CurveId, StimulusEntry>,
     pub stimulus_order: Vec<CurveId>,
     pub stimulus_editor: StimulusEditorState,
+    /// Loaded image cubes, shared by the Stimulus Editor (curve extraction)
+    /// and the Image Display window (receptor renderings).
+    pub image_library: ImageLibrary,
+    /// Image Display window state (its list of saved views, load buffers).
+    pub image_display: ImageDisplayState,
+    /// Lazily-initialized wgpu compute context for the receptor renderer,
+    /// shared (`Arc`) with the background render worker; `gpu_attempted`
+    /// records that a probe has run (so a machine without a usable adapter
+    /// doesn't retry every frame).
+    pub gpu: Option<Arc<xenovision_core::gpu::GpuContext>>,
+    pub gpu_attempted: bool,
     /// Which panels are docked as tabs in the main window, floating in
     /// their own windows, or hidden.
     pub dock: DockLayout,
@@ -634,6 +650,10 @@ impl AppState {
             stimulus_curves,
             stimulus_order,
             stimulus_editor: StimulusEditorState::default(),
+            image_library: ImageLibrary::default(),
+            image_display: ImageDisplayState::default(),
+            gpu: None,
+            gpu_attempted: false,
             dock: DockLayout::default(),
             pending_dock_actions: Vec::new(),
             transform_cache: TransformCache::default(),

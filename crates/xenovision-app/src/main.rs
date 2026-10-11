@@ -1,20 +1,25 @@
-//! Xenovision GUI: three panels (Workspace, Comparison, Stimulus Editor;
-//! design doc `docs/gui-design-doc.md` §2) sharing one `AppState`. The
-//! main OS window hosts any docked panels as tabs; each other panel
+//! Xenovision GUI: four panels (Workspace, Comparison, Stimulus Editor,
+//! Image Display; design doc `docs/design-doc.md`) sharing one `AppState`.
+//! The main OS window hosts any docked panels as tabs; each other panel
 //! floats in its own OS window or is hidden (see `dock`).
 
 // Release builds on Windows are GUI programs, so no console window opens
 // alongside the app. Debug builds keep the console for log output.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod batch_export;
+mod colormap;
 mod dock;
 mod gradient;
+mod image_library;
 mod multi_curve_editor;
 mod plot_axis;
+mod region_selector;
+mod render_worker;
 mod state;
 mod stimulus_picker;
 mod undo;
 mod window_comparison;
+mod window_image_display;
 mod window_stimulus_editor;
 mod window_workspace;
 
@@ -33,6 +38,7 @@ fn min_panel_size(kind: PanelKind) -> egui::Vec2 {
         PanelKind::Workspace => egui::vec2(960.0, 640.0),
         PanelKind::Comparison => egui::vec2(900.0, 520.0),
         PanelKind::StimulusEditor => egui::vec2(800.0, 520.0),
+        PanelKind::ImageDisplay => egui::vec2(900.0, 560.0),
     }
 }
 
@@ -50,6 +56,7 @@ fn panel_ui(kind: PanelKind, ui: &mut egui::Ui, state: &mut state::AppState) {
                 PanelKind::Workspace => window_workspace::ui(ui, state),
                 PanelKind::Comparison => window_comparison::ui(ui, state),
                 PanelKind::StimulusEditor => window_stimulus_editor::ui(ui, state),
+                PanelKind::ImageDisplay => window_image_display::ui(ui, state),
             });
         });
 }
@@ -194,7 +201,11 @@ mod layout_tests {
         );
         app.state.stimulus_editor.creation_mode = window_stimulus_editor::CreationMode::Notch;
         let ctx = egui::Context::default();
-        for kind in [PanelKind::Comparison, PanelKind::StimulusEditor] {
+        for kind in [
+            PanelKind::Comparison,
+            PanelKind::StimulusEditor,
+            PanelKind::ImageDisplay,
+        ] {
             app.state.dock.apply(DockAction::OpenDocked(kind));
             run_frames(&mut app, &ctx, 1200.0, 900.0, 3);
             assert_eq!(app.state.dock.active, kind);
@@ -206,7 +217,10 @@ mod layout_tests {
         app.state
             .dock
             .apply(DockAction::Undock(PanelKind::Comparison));
-        assert_eq!(app.state.dock.docked, vec![PanelKind::StimulusEditor]);
+        assert_eq!(
+            app.state.dock.docked,
+            vec![PanelKind::StimulusEditor, PanelKind::ImageDisplay]
+        );
         run_frames(&mut app, &ctx, 1200.0, 900.0, 3);
         // Requests queued from inside a panel are applied at frame end.
         app.state
@@ -268,7 +282,11 @@ mod layout_tests {
             "layout should exceed the 400px window (and scroll), got {right:?}"
         );
 
-        for kind in [PanelKind::Comparison, PanelKind::StimulusEditor] {
+        for kind in [
+            PanelKind::Comparison,
+            PanelKind::StimulusEditor,
+            PanelKind::ImageDisplay,
+        ] {
             app.state.dock.apply(DockAction::OpenDocked(kind));
             run_frames(&mut app, &ctx, 400.0, 300.0, 3);
         }
