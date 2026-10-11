@@ -36,11 +36,13 @@ mkdir -p "$DIST"
 
 echo "==> Rendering user guide PDF"
 { echo "<style>"; cat docs/user-guide-print.css; echo "</style>"; } > "$WORK/head.html"
-pandoc README.md -o "$WORK/user-guide.pdf" \
+# Render from inside docs/ so the guide's relative image paths
+# (screenshots/*.png) resolve for the PDF engine.
+( cd docs && pandoc user-guide.md -o "$WORK/user-guide.pdf" \
   --pdf-engine=wkhtmltopdf \
   --metadata pagetitle="Xenovision User Guide" \
   --include-in-header="$WORK/head.html" \
-  -V margin-top=18mm -V margin-bottom=18mm -V margin-left=18mm -V margin-right=18mm \
+  -V margin-top=18mm -V margin-bottom=18mm -V margin-left=18mm -V margin-right=18mm ) \
   2> >(grep -vE "QStandardPaths|Loading pages|Printing pages|Done|\[=" >&2 || true)
 
 if [ "$WINDOWS" -eq 1 ]; then

@@ -18,6 +18,7 @@ mod multi_curve_editor;
 mod plot_axis;
 mod region_selector;
 mod render_worker;
+mod shots;
 mod state;
 mod stimulus_picker;
 mod undo;
@@ -31,6 +32,9 @@ use eframe::egui;
 
 struct App {
     state: state::AppState,
+    /// When launched with `--screenshot`, the scriptable documentation
+    /// screenshot driver; `None` in normal use (and in tests).
+    shots: Option<shots::ShotSession>,
 }
 
 /// Smallest content area each panel is laid out in. When its window is
@@ -517,7 +521,19 @@ impl Default for App {
     fn default() -> Self {
         App {
             state: state::AppState::new(),
+            shots: None,
         }
+    }
+}
+
+impl App {
+    /// Builds the app with the documentation-screenshot driver active: the
+    /// demo data is seeded immediately (before the first frame) and `frame`
+    /// then walks the capture scenes and exits when done.
+    fn with_shots(cfg: shots::Config) -> App {
+        let mut app = App::default();
+        app.shots = Some(shots::ShotSession::start(&mut app.state, cfg));
+        app
     }
 }
 
@@ -532,6 +548,14 @@ impl App {
     /// driven headlessly in tests (an `eframe::Frame` can't be built
     /// outside eframe).
     fn frame(&mut self, ctx: &egui::Context) {
+        // The screenshot driver (when active) is taken out of `self` for the
+        // duration of the frame so its hooks don't fight the `&mut self.state`
+        // borrows below; it's put back at the end.
+        let mut shots = self.shots.take();
+        if let Some(s) = shots.as_mut() {
+            s.begin_frame(ctx);
+        }
+
         // Dock changes are collected during the frame and applied at the
         // end, so the set of docked/floating containers/instances never
         // changes while they're being drawn.
@@ -648,11 +672,19 @@ impl App {
             self.state
                 .dispatch_dock_action(DockAction::DockContainer(kind));
         }
+
+        if let Some(s) = shots.as_mut() {
+            s.end_frame(ctx, &mut self.state);
+        }
+        self.shots = shots;
     }
 }
 
 fn main() -> eframe::Result<()> {
-    let options = eframe::NativeOptions {
+    let args: Vec<String> = std::env::args().collect();
+    let shots_cfg = shots::Config::from_args(&args);
+
+    let mut options = eframe::NativeOptions {
         // Speculative mitigation for a window-resize crash reported under
         // WSLg ("Io error: Connection reset by peer" / WinitEventLoop
         // ExitFailure) - vsync's swap-interval handling is a plausible
@@ -674,10 +706,23 @@ fn main() -> eframe::Result<()> {
         vsync: false,
         ..Default::default()
     };
+    if shots_cfg.is_some() {
+        // A fixed, roomy window so the documentation captures are
+        // deterministic and every panel fits without its scroll wrapper
+        // kicking in.
+        options.viewport = options.viewport.with_inner_size([1440.0, 900.0]);
+    }
+
     eframe::run_native(
         "Xenovision",
         options,
-        Box::new(|_cc| Ok(Box::new(App::default()))),
+        Box::new(move |_cc| {
+            let app = match shots_cfg {
+                Some(cfg) => App::with_shots(cfg),
+                None => App::default(),
+            };
+            Ok(Box::new(app))
+        }),
     )
 }
 

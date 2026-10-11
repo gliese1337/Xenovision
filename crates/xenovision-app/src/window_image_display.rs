@@ -135,6 +135,14 @@ impl ImageView {
             error: None,
         }
     }
+
+    /// Whether this view has reached a resting state: a finished render is
+    /// installed, or the render failed. Used by the documentation-screenshot
+    /// driver (`shots.rs`) to wait for the background renderer before
+    /// capturing the Image Display panel.
+    pub fn is_settled(&self) -> bool {
+        self.render.is_some() || self.error.is_some()
+    }
 }
 
 /// A finished render: the channel data plus the textures currently shown.

@@ -13,7 +13,7 @@ cargo run -p xenovision-app
 ## Release packages
 
 `scripts/package.sh` builds a package into `dist/`, with the user guide
-(`README.md`) rendered to `user-guide.pdf` inside it:
+(`docs/user-guide.md`) rendered to `user-guide.pdf` inside it:
 
 ```sh
 scripts/package.sh              # this OS: Linux tarball or macOS .dmg
@@ -87,6 +87,33 @@ powershell -File scripts\package-linux.ps1 -Distro Ubuntu-26.04 -TargetDir /home
   which its license restricts to Apple hardware. The app is ad-hoc signed,
   not signed with a Developer ID or notarized, so the first launch needs
   right-click → Open. Proper signing needs an Apple Developer account.
+
+## Guide screenshots
+
+`docs/user-guide.md` is the illustrated user guide - a superset of
+`README.md`, with a screenshot for each window. Every release package's PDF is
+rendered from it, images embedded. The images in `docs/screenshots/` are
+captured from a live build, never drawn by hand.
+
+Capturing needs a sample-data folder holding `usgs_splib07/` (USGS reflectance
+spectra) and `envi/` (ENVI hyperspectral cubes). That folder is **not** part of
+the repository - `data/` is git-ignored - so supply your own copy and point the
+script at it:
+
+```powershell
+scripts/regenerate-docs-screenshots.ps1 -DataDir <path-to-your-data>
+```
+
+The script builds and runs the app in `--screenshot` mode (implemented in
+`crates/xenovision-app/src/shots.rs`), which seeds those reflectance curves and
+ENVI cubes, renders each panel, captures it straight from the GPU framebuffer,
+and exits. Seeding is in-memory only, so it never touches your per-user data
+directory - a run is reproducible and safe. Re-run it after any UI change and
+commit the refreshed PNGs.
+
+The PDF pipeline renders from inside `docs/` so the guide's relative image
+paths resolve, and `docs/screenshots/*.png` are embedded when
+`scripts/package.sh` / `scripts/package.ps1` render the PDF.
 
 ## Notes
 

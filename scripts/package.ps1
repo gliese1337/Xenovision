@@ -24,9 +24,9 @@
   scripts/package.ps1 -SkipPdf       # binary-only package, no pandoc needed
 
 .PARAMETER SkipPdf
-  Skip rendering README.md to user-guide.pdf. Also skips the pandoc and
-  wkhtmltopdf requirement checks, so a package can be built on a machine that
-  lacks them.
+  Skip rendering docs/user-guide.md to user-guide.pdf. Also skips the pandoc
+  and wkhtmltopdf requirement checks, so a package can be built on a machine
+  that lacks them.
 #>
 [CmdletBinding()]
 param(
@@ -84,22 +84,38 @@ try {
 
         $quiet = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'   # native stderr must not be fatal here
+        $code = 1
         try {
-            & pandoc README.md -o (Join-Path $Work 'user-guide.pdf') `
-                --pdf-engine=wkhtmltopdf `
-                --metadata pagetitle="Xenovision User Guide" `
-                --include-in-header $headHtml `
-                -V margin-top=18mm -V margin-bottom=18mm -V margin-left=18mm -V margin-right=18mm `
-                2>&1 | ForEach-Object { "$_" } |
-                    Where-Object { $_ -notmatch 'QStandardPaths|Loading pages|Printing pages|Done|\[=' }
+            # Render from inside docs/ so the guide's relative image paths
+            # (screenshots/*.png) resolve for the PDF engine.
+            Push-Location (Join-Path $Root 'docs')
+            try {
+                & pandoc user-guide.md -o (Join-Path $Work 'user-guide.pdf') `
+                    --pdf-engine=wkhtmltopdf `
+                    --metadata pagetitle="Xenovision User Guide" `
+                    --include-in-header $headHtml `
+                    -V margin-top=18mm -V margin-bottom=18mm -V margin-left=18mm -V margin-right=18mm `
+                    2>&1 | ForEach-Object { "$_" } |
+                        Where-Object { $_ -notmatch 'QStandardPaths|Loading pages|Printing pages|Done|\[=' }
+                $code = $LASTEXITCODE
+            }
+            finally { Pop-Location }
         }
         finally { $ErrorActionPreference = $quiet }
-        if ($LASTEXITCODE -ne 0) { Write-Error "pandoc failed (exit $LASTEXITCODE)" -ErrorAction Stop }
+        if ($code -ne 0) { Write-Error "pandoc failed (exit $code)" -ErrorAction Stop }
     }
 
     Write-Host "==> Building Xenovision (release)"
-    & cargo build --release -p xenovision-app
-    if ($LASTEXITCODE -ne 0) { Write-Error "cargo build failed (exit $LASTEXITCODE)" -ErrorAction Stop }
+    # Native stderr (cargo logs to it) must not be a terminating error under
+    # `$ErrorActionPreference = 'Stop'`; check the exit code instead.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & cargo build --release -p xenovision-app
+        $buildCode = $LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $prevEap }
+    if ($buildCode -ne 0) { Write-Error "cargo build failed (exit $buildCode)" -ErrorAction Stop }
 
     $exe = Join-Path $Root "target\release\xenovision-app.exe"
     if (-not (Test-Path -LiteralPath $exe)) {
@@ -110,8 +126,13 @@ try {
     $strip = Get-Command llvm-strip -ErrorAction SilentlyContinue
     if (-not $strip) { $strip = Get-Command strip -ErrorAction SilentlyContinue }
     if ($strip) {
-        & $strip.Source (Join-Path $PKG 'Xenovision.exe')
-        if ($LASTEXITCODE -ne 0) { Write-Warning "strip exited $LASTEXITCODE; keeping the exe unstripped" }
+        $ErrorActionPreference = 'Continue'
+        try {
+            & $strip.Source (Join-Path $PKG 'Xenovision.exe')
+            $stripCode = $LASTEXITCODE
+        }
+        finally { $ErrorActionPreference = $prevEap }
+        if ($stripCode -ne 0) { Write-Warning "strip exited $stripCode; keeping the exe unstripped" }
     } else {
         Write-Warning "no llvm-strip/strip on PATH; ship the exe unstripped (rustup component add llvm-tools-preview)."
     }

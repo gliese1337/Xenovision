@@ -1,7 +1,10 @@
 # Xenovision User Guide
 
-A reference to every window, menu, and gesture in the current (three-window)
-build. See `docs/design-doc.md` if you want the modeling math.
+A reference to every window, menu, and gesture in the current build.
+
+> An illustrated version of this guide - with a screenshot of every window - is
+> in [`docs/user-guide.md`](docs/user-guide.md). That is the document shipped as
+> `user-guide.pdf` in the release packages.
 
 ## Overview
 
@@ -9,22 +12,33 @@ Xenovision models and compares how different species perceive color. You
 define a **visual system** as a set of photoreceptor sensitivity curves,
 Xenovision derives that system's luminance and chroma channels from them, and
 then evaluates arbitrary **stimulus spectra** (reflectance samples, light
-sources) through it to get perceptual coordinates and distances. Twelve
+sources) through it to get perceptual coordinates and distances. Eleven
 literature-based species are built in, from trichromatic humans to the
 twelve-receptor mantis shrimp, and you can define your own alongside them.
 
-The interface is three panels, each shown as a tab in the main window or
-in its own separate window (see [Arranging windows](#arranging-windows)):
+The interface is four panels - **Workspace**, **Comparison**, **Stimulus
+Editor**, and **Image Display** - sharing one window model (see
+[Arranging windows](#arranging-windows)): each panel is a **container** with
+its own top-level tab in the main window, each container holds one or more
+**instances** as tabs beneath it, and any tab - container or instance - can be
+popped out into its own OS window and docked back.
 
 - **Workspace** - define and edit visual systems: receptor curves, noise
-  data, opponent contrasts. Always open.
+  data, opponent contrasts. Always open; each of its instances is a Curve Set.
 - **Comparison** - run stimuli through one or more visual systems and read
-  off coordinates, distances, and cross-species summaries. Opens on demand.
+  off coordinates, distances, and cross-species summaries.
 - **Stimulus Editor** - create and edit the stimulus curves (reflectance or
   radiance) that Comparison evaluates - by hand, derived from another curve,
-  or imported from an image or a text/CSV file. Opens on demand.
+  or imported from an image or a text/CSV file.
+- **Image Display** - render a loaded image (or one region of it) through a
+  visual system's receptors and inspect the result channel by channel.
 
-All three read and write the same underlying data. Edit a curve in Workspace
+Comparison, Stimulus Editor, and Image Display are **repeatable**: open
+several independent instances at once, each with its own setup, from a
+container's **＋ New** button or the **Windows** menu. They start closed on
+first launch.
+
+All four read and write the same underlying data. Edit a curve in Workspace
 and an open Comparison window updates on its next repaint - there's no
 separate "sync" step anywhere in the app.
 
@@ -255,48 +269,107 @@ the built-in luminants' unit, so it works with **Derive reflectance from
 radiance...** directly; change the unit in the curve's editor if you know
 the image's calibration.
 
+## Image Display window
+
+Renders an image through a visual system's receptor channels: each output
+channel is one receptor's activation, integrated over every pixel's actual
+spectrum. A left rail, then a scrolling list of **views**.
+
+**Left rail** - load an ENVI (point at the `.hdr`), GeoTIFF, or MATLAB
+`.mat` file, or pick from the list of loaded images. The image list is shared
+with the Stimulus Editor, so an image loaded in either place is available in
+both (**✕** unloads it). **+ Add view for selected image** and **+ Add blank
+view** start a view; **＋ New Image Display window** opens an independent
+second panel. Every panel shares the loaded images but keeps its own views.
+
+**Each view** is one configured render. Its **Settings** header (collapsed by
+default) picks the **Image**; the **Visual system** and **Regime** (or the
+system's dominant one); the **Stage** (**raw receptor**, **von Kries
+adapted**, or **perceptual**; a species with no regime is raw-only, one panel
+per receptor); how to treat the pixels (**Reflectance** or **Radiance**) and,
+for reflectance, the **Luminant**; the **Region** (whole image, a region saved
+in the Stimulus Editor, or one drawn here); the integration **step**; and the
+display mapping. **Duplicate** copies a view and **✕** removes it.
+
+**Display** is either **one panel per channel** (each with a selectable
+colormap and a low→high swatch) or a single **composite image**: the
+perceptual stage gets an `L*`-style `[L, C_a, C_b]` encoder (both chroma axes
+selectable, so a regime with more than three receptors can show any pair),
+and any stage can instead map three chosen channels straight to R/G/B.
+
+Two things are always on screen so a result is never ambiguous: a
+**provenance bar** naming every input (source and band, region, input kind +
+luminant, species + regime, stage, step, GPU/CPU) and a **false-color
+legend** spelling out the mapping actually used. Hovering an image reads out
+that pixel's channel values.
+
+Rendering runs off the UI thread, so a large cube never freezes the window;
+while a render is in flight the previous image stays on screen with a small
+"rendering…" note (a spinner if there's nothing to show yet).
+
+From the Stimulus Editor's image import pane, **Show channels in Image
+Display** opens (or reuses) an Image Display window already seeded with the
+image and region you were looking at.
+
 ## How the windows connect
 
-All three windows read and write one shared pool of data - there's no
+All four windows read and write one shared pool of data - there's no
 per-window copy of anything.
 
 - Edit a curve's points, noise data, or opponent contrasts in Workspace, and
   an open Comparison window reflects it on its very next repaint. The same
   goes for editing a stimulus curve in the Stimulus Editor.
-- Closing the Comparison or Stimulus Editor *panel* doesn't discard what's
-  in it - selections, a loaded image, scroll position, and so on persist
-  until you reopen it. Closing a Workspace *tab* (a visual system) or
-  unloading a stimulus curve is different: that data really is discarded
-  (hence the unsaved-changes warning first).
+- The image library and its named regions are shared too: load an image once,
+  in the Stimulus Editor or any Image Display window, and every Image Display
+  view can render it.
+- Closing a repeatable instance (Comparison, Stimulus Editor, Image Display)
+  doesn't discard its setup - the last one closed is *parked*, and the next
+  instance of that kind inherits it when no other instance of that kind is
+  open. Closing a Workspace *tab* (a visual system) or unloading a stimulus
+  curve is different: that data really is discarded (hence the
+  unsaved-changes warning first).
 
 ## Arranging windows
 
-The main window shows a strip of panel tabs along its top. Each panel is
-in one of three places:
+The main window shows a strip of **container** tabs along its top - one for
+each panel group currently docked in it. Selecting a container shows its
+**instance** tabs beneath it and the active instance's contents. A container
+and an instance are each independently **docked** (a tab in the main window)
+or **floating** (its own separate window, which you can move to another
+monitor):
 
-- **Docked** - a tab in the main window. Click the tab to switch to it.
-- **Floating** - in its own separate window, which you can move to another
-  monitor.
-- **Closed** - not shown (Comparison and Stimulus Editor only; their
-  contents are kept for when you reopen them).
+- A **container** is one whole panel group: the Workspace with all its Curve
+  Sets, or all the Comparison instances, and so on.
+- An **instance** is one tab inside a container: a Workspace Curve Set, or one
+  Comparison / Stimulus Editor / Image Display panel.
+
+A kind's container tab is shown only while it has at least one instance still
+inside it. On first launch, Comparison, Stimulus Editor, and Image Display
+have no instance and so no tab.
 
 | To... | Do this |
 |---|---|
-| Pop a docked tab out into its own window | Click **⇱** on its tab. |
-| Merge a floating window back in as a tab | Click **⇲ Dock into main window** at the top of that window. |
-| Close a panel | Click **×** on its tab, or close its floating window. |
-| Open a closed panel | **Windows ▾** at the end of the tab strip (or Workspace's **Window** menu), then **Open as tab** or **Open as window**. |
+| Pop a docked tab out into its own window | Click **⇱** on the tab (a container tab floats the whole group; an instance tab pops out just that one), or drag the tab away from its strip and release. |
+| Merge a floating window back in as a tab | Click **⇲ Dock into main window** at the top of that window, or drag its title tab back over the main window and release. |
+| Make a new instance | The **＋ New** button on a container's own tab bar, or **Windows ▾**. |
+| Close an instance | Click **×** on its tab, or close its floating window. |
+| Move or open any panel | **Windows ▾** at the end of the tab strip (or Workspace's **Window** menu): every container and instance is listed with a Float/Dock and a Close action. |
 
-Every panel stays usable in a small window: below its minimum size
-(about 960×640 for Workspace, 900×520 for Comparison, 800×520 for
-Stimulus Editor) it keeps its layout and gains scrollbars instead of
-squashing. Comparison also scrolls vertically on its own, and its results
-column scrolls sideways when tables are wide.
+While you drag a tab, a ghost chip follows the pointer, even into another OS
+window. Release it over the main window and the chip turns green with the main
+window outlined, showing that the drop will dock rather than float; releasing
+it back in its own strip just selects it instead.
 
-Two rules keep the layout usable: the main window always keeps at least one
-tab (so ⇱ and × are disabled on the last one), and Workspace can't be
-closed - closing its floating window docks it back into the main window
-instead.
+Every panel stays usable in a small window: below its minimum size (about
+960×640 for Workspace, 900×520 for Comparison, 800×520 for the Stimulus
+Editor, 900×560 for Image Display) it keeps its layout and gains scrollbars
+instead of squashing. Comparison also scrolls vertically on its own, and its
+results column scrolls sideways when tables are wide.
+
+You can float every container, leaving the main window empty (it then reads
+"No windows open"); closing a floating *container* window docks that group
+back into the main window rather than closing it, so no group is ever lost;
+closing a floating *instance* window closes just that one instance.
 
 ## Keyboard & mouse reference
 
@@ -309,6 +382,8 @@ instead.
 | Drag | Any curve graph | Move the selected curve's point under the cursor |
 | Double-click | Any curve graph, empty area | Add a point to the selected curve |
 | Right-click | Any curve graph, on a point | Remove that point |
+| Drag a tab | Any tab bar | Pull it past a short distance and release to pop it out; release it back in the bar to just select it |
+| Drag a floating window's title tab | Top of a floating window | Drop it over the main window to re-dock that window |
 
 "Any curve graph" covers the Workspace center pane, Comparison's luminant
 editor, and the Stimulus Editor's curve editor - they're all the same
