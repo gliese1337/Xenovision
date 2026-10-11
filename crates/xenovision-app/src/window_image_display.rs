@@ -1847,6 +1847,48 @@ mod tests {
         assert_eq!(app.image_displays[&a].views.len(), 1);
     }
 
+    /// Closing the last Image Display window parks its views; the next window
+    /// inherits them (last closed wins), while a window opened alongside an
+    /// existing one starts blank.
+    #[test]
+    fn last_closed_image_display_setup_is_restored() {
+        use crate::image_library::ImageSource;
+        use xenovision_core::hyperspectral::HyperspectralCube;
+
+        let mut app = crate::state::AppState::new();
+        let cube = HyperspectralCube::from_band_major(
+            2,
+            2,
+            3,
+            Some(vec![450.0, 550.0, 650.0]),
+            vec![0.5f32; 12],
+            "synthetic",
+        );
+        let src = app
+            .image_library
+            .add(ImageSource::new("synthetic", "synthetic", cube));
+
+        let a = app.new_image_display(false);
+        seed_view(&mut app, a, Some(src), None);
+        seed_view(&mut app, a, None, None);
+        assert_eq!(app.image_displays[&a].views.len(), 2);
+
+        // A window opened while one is already open starts blank.
+        let b = app.new_image_display(true);
+        assert!(app.image_displays[&b].views.is_empty());
+
+        // Close b, then a: a is now the last-closed, so the next window
+        // inherits a's two views.
+        app.dispatch_dock_action(DockAction::Close(b));
+        app.dispatch_dock_action(DockAction::Close(a));
+        let c = app.new_image_display(false);
+        assert_eq!(
+            app.image_displays[&c].views.len(),
+            2,
+            "the reopened window inherits the last-closed window's views"
+        );
+    }
+
     /// `primary_image_display` reuses an open panel if there is one (so the
     /// Stimulus Editor's "Show channels" button doesn't spawn a new window on
     /// every click) and creates one only when none is open.

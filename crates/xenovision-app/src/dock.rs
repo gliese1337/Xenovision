@@ -10,10 +10,11 @@
 //! ([`PanelKind::is_multi_instance`]), so several independent panels can be
 //! open (docked and/or floating) at the same time - each with its own
 //! selection/views, all reading the same shared state (curve sets, stimulus
-//! library, image library). The first instance (`0`) of Comparison and
-//! Stimulus Editor is the long-lived "primary" - its state survives being
-//! hidden and is what other panels' cross-references read - while extra
-//! instances (and every Image Display panel) are discarded when closed.
+//! library, image library). Instance numbers are assigned lowest-free, so the
+//! first panel of a kind is always instance `0`. Closing a repeatable panel
+//! *parks* its state: the next window of that kind inherits the most recently
+//! closed panel's setup when no other window of that kind is open (see
+//! `AppState::new_panel`).
 
 use eframe::egui;
 
@@ -58,7 +59,7 @@ impl PanelKind {
 
 /// Identifies one panel instance: a [`PanelKind`] plus an instance number.
 /// Singleton kinds always use instance `0`; repeatable kinds are numbered
-/// from `0` as they are created.
+/// lowest-free as they are created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PanelId {
     pub kind: PanelKind,
@@ -86,19 +87,6 @@ impl PanelId {
 
     pub fn viewport_id(self) -> egui::ViewportId {
         egui::ViewportId::from_hash_of(("xenovision-panel", self.kind, self.instance))
-    }
-
-    /// Whether closing (hiding) this instance preserves its state for when it
-    /// is reopened. The first instance of a repeatable Comparison/Stimulus
-    /// Editor panel is the long-lived "primary" - its state lives in
-    /// `AppState`'s dedicated fields, so hiding the panel keeps it - while
-    /// every extra instance and every Image Display panel is discarded on
-    /// close (a new one starts blank).
-    pub fn keeps_state_when_closed(self) -> bool {
-        match self.kind {
-            PanelKind::ImageDisplay => false,
-            _ => self.instance == 0,
-        }
     }
 }
 
@@ -278,42 +266,38 @@ fn instance_row(ui: &mut egui::Ui, layout: &DockLayout, id: PanelId, actions: &m
     });
 }
 
-/// One row per panel kind for its existing instances, plus a "New ... window"
-/// action for repeatable kinds - shared by the dock host's "Windows" menu and
+/// The panel ids the Windows menu lists for `kind`: every open repeatable
+/// instance (docked/floating), or the single Workspace.
+fn menu_panel_ids(layout: &DockLayout, kind: PanelKind) -> Vec<PanelId> {
+    if kind.is_multi_instance() {
+        let mut ids = layout.panels_of_kind(kind);
+        ids.sort_unstable();
+        ids
+    } else {
+        vec![PanelId::singleton(kind)]
+    }
+}
+
+/// One row per open panel instance, plus a "New ... window" action for
+/// repeatable kinds - shared by the dock host's "Windows" menu and
 /// Workspace's "Window" menu.
 pub fn window_menu(ui: &mut egui::Ui, layout: &DockLayout, actions: &mut Vec<DockAction>) {
     for kind in PanelKind::ALL {
-        if kind.is_multi_instance() {
-            // The primary instance of Comparison/Stimulus Editor exists even
-            // while hidden (its state persists), so it is always listed; extra
-            // instances only exist while open. Image Display has no persistent
-            // instance, so only open ones appear.
-            let primary = PanelId::singleton(kind);
-            let mut ids = Vec::new();
-            if primary.keeps_state_when_closed() {
-                ids.push(primary);
-            }
-            for id in layout.panels_of_kind(kind) {
-                if !ids.contains(&id) {
-                    ids.push(id);
-                }
-            }
-            ids.sort_unstable();
-            for id in ids {
-                instance_row(ui, layout, id, actions);
-            }
-            if ui
+        for id in menu_panel_ids(layout, kind) {
+            instance_row(ui, layout, id, actions);
+        }
+        if kind.is_multi_instance()
+            && ui
                 .button(format!("＋ New {} window", kind.title()))
                 .on_hover_text(
-                    "Open another independent panel; every window shares the loaded data",
+                    "Open another independent panel; every window shares the loaded data. \
+                     When no window of this kind is open, the new one inherits the most \
+                     recently closed one's setup.",
                 )
                 .clicked()
-            {
-                actions.push(DockAction::NewInstance(kind));
-                ui.close_menu();
-            }
-        } else {
-            instance_row(ui, layout, PanelId::singleton(kind), actions);
+        {
+            actions.push(DockAction::NewInstance(kind));
+            ui.close_menu();
         }
     }
 }
@@ -352,11 +336,9 @@ pub fn tab_strip(ui: &mut egui::Ui, layout: &DockLayout, actions: &mut Vec<DockA
                         layout.allows(DockAction::Close(id)),
                         egui::Button::new("×").small(),
                     )
-                    .on_hover_text(if id.keeps_state_when_closed() {
-                        "Close (its contents are kept for next time)"
-                    } else {
-                        "Close (discards this panel; the shared data is kept)"
-                    })
+                    .on_hover_text(
+                        "Close (its setup is remembered for the next window of this kind)",
+                    )
                     .clicked()
             {
                 actions.push(DockAction::Close(id));
@@ -496,15 +478,32 @@ mod tests {
     }
 
     #[test]
-    fn only_the_primary_instance_of_comparison_keeps_state_when_closed() {
-        // The first Comparison/Stimulus Editor instance is the persistent
-        // primary; extra instances and every Image Display panel are
-        // discarded when closed.
-        assert!(cmp().keeps_state_when_closed());
-        assert!(!PanelId::new(PanelKind::Comparison, 1).keeps_state_when_closed());
-        assert!(stim().keeps_state_when_closed());
-        assert!(!PanelId::new(PanelKind::StimulusEditor, 2).keeps_state_when_closed());
-        assert!(!img(0).keeps_state_when_closed());
-        assert!(!img(3).keeps_state_when_closed());
+    fn menu_lists_open_instances_and_never_a_hidden_repeatable_panel() {
+        // The Windows menu lists only open instances of a repeatable kind plus
+        // its "New" action; a closed panel leaves no lingering row (its setup
+        // is parked and inherited by the next "New" window instead).
+        let mut l = DockLayout::default();
+        l.apply(DockAction::OpenDocked(cmp()));
+        l.apply(DockAction::OpenFloating(img(1)));
+        assert_eq!(
+            menu_panel_ids(&l, PanelKind::Comparison),
+            vec![cmp()],
+            "only the open Comparison instance is listed"
+        );
+        assert_eq!(
+            menu_panel_ids(&l, PanelKind::ImageDisplay),
+            vec![img(1)]
+        );
+        assert_eq!(
+            menu_panel_ids(&l, PanelKind::Workspace),
+            vec![ws()],
+            "Workspace is always listed"
+        );
+
+        l.apply(DockAction::Close(cmp()));
+        assert!(
+            menu_panel_ids(&l, PanelKind::Comparison).is_empty(),
+            "a closed repeatable panel is not listed"
+        );
     }
 }

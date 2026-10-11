@@ -18,13 +18,17 @@
 //!   app's existing, already-tested gesture-detecting snapshot manager,
 //!   rather than a hand-rolled `EditAction` command log - the design doc
 //!   explicitly allows either, and reusing proven logic is lower-risk.
-//! - `comparison`/`stimulus_editor` are always-present structs (the primary
-//!   instance of each repeatable panel) rather than `Option<...>` - hidden vs.
-//!   shown is a `dock` placement, and the primary's state persists while
-//!   hidden. Extra instances of the repeatable panels (Comparison, Stimulus
-//!   Editor, Image Display) live in per-panel maps keyed by `PanelId`, and
-//!   `Image Displays`/`comparison`-reading window modules never need to know
-//!   which instance they are drawing (see `AppState::with_comparison`).
+//! - `comparison`/`stimulus_editor` are always-present structs rather than
+//!   `Option<...>`: they hold the *parked* (most recently closed) state of
+//!   each repeatable panel, which is what a new window inherits when no other
+//!   window of that kind is open, and which other panels read as app-wide
+//!   defaults. Every open instance - of Comparison, Stimulus Editor and Image
+//!   Display alike - lives in a per-panel map keyed by `PanelId`, and the
+//!   window modules never need to know which instance they are drawing: the
+//!   instance's state is swapped into the `comparison`/`stimulus_editor` field
+//!   for the duration of that instance's draw (see
+//!   `AppState::with_comparison`). Closing a panel *parks* its state (last
+//!   closed wins) instead of discarding it.
 //! - `DistanceMetric` is reused directly from `xenovision_core::comparison`
 //!   rather than redefined.
 //!
@@ -545,27 +549,27 @@ pub struct AppState {
     next_id: u64,
     pub curve_sets: HashMap<CurveSetId, AppCurveSet>,
     pub workspace: WorkspaceState,
-    /// The primary Comparison panel (instance `0`). Comparison is repeatable,
-    /// so extra instances live in `extra_comparisons`; only this one is a
-    /// dedicated field, since other panels read its reference luminant /
-    /// export settings as app-wide defaults.
+    /// Every open Comparison panel, keyed by its [`PanelId`]. This is the
+    /// state a panel actually draws from; [`AppState::with_comparison`] swaps
+    /// the instance's state into the `comparison` field only while it draws.
+    pub comparisons: HashMap<PanelId, ComparisonState>,
+    /// The *parked*, most-recently-closed Comparison state. A newly opened
+    /// Comparison window inherits it when no other Comparison is open;
+    /// otherwise the window starts blank. Other panels read its reference
+    /// luminant / export settings as app-wide defaults, and the currently
+    /// drawing Comparison is swapped in here (see `with_comparison`).
     pub comparison: ComparisonState,
-    /// Every open *extra* (instance ≥ `1`) Comparison panel, keyed by its
-    /// [`PanelId`]. Extra panels are discarded when closed (see
-    /// `PanelId::keeps_state_when_closed`); the primary is `comparison`.
-    pub extra_comparisons: HashMap<PanelId, ComparisonState>,
     /// The shared stimulus-curve library (reflectance/radiance/
     /// illuminance samples) - edited primarily from the Stimulus Editor
     /// window, but read by Comparison the same way `curve_sets` is.
     pub stimulus_curves: HashMap<CurveId, StimulusEntry>,
     pub stimulus_order: Vec<CurveId>,
-    /// The primary Stimulus Editor panel (instance `0`); like `comparison`,
-    /// its state survives being hidden and other panels (Image Display's
-    /// "show channels") read its image selection / region. Extra instances
-    /// live in `extra_stimulus_editors`.
+    /// Every open Stimulus Editor panel, keyed by its [`PanelId`]; swapped
+    /// into `stimulus_editor` while that instance draws.
+    pub stimulus_editors: HashMap<PanelId, StimulusEditorState>,
+    /// The *parked*, most-recently-closed Stimulus Editor state, inherited by
+    /// a newly opened editor when none other is open (see `comparisons`).
     pub stimulus_editor: StimulusEditorState,
-    /// Every open *extra* (instance ≥ `1`) Stimulus Editor panel.
-    pub extra_stimulus_editors: HashMap<PanelId, StimulusEditorState>,
     /// Loaded image cubes, shared by the Stimulus Editor (curve extraction)
     /// and every Image Display panel (receptor renderings).
     pub image_library: ImageLibrary,
@@ -574,10 +578,12 @@ pub struct AppState {
     /// independent panels - each with its own view list - can be open at once,
     /// all reading the one shared `image_library`.
     pub image_displays: HashMap<PanelId, ImageDisplayState>,
-    /// Next instance number handed out per repeatable panel kind (see
-    /// `PanelId::instance`). Comparison/Stimulus Editor start at `1`, reserving
-    /// `0` for their persistent primary; Image Display starts at `0`.
-    next_panel_instance: HashMap<PanelKind, u32>,
+    /// The *parked*, most-recently-closed Image Display state, inherited by a
+    /// newly opened panel when none other is open. Unlike the other repeatable
+    /// kinds this owns its render worker, so it is `Option`al - nothing is
+    /// spawned until a panel actually opens - and parks (rather than drops)
+    /// that worker so the views can be restored.
+    pub remembered_image_display: Option<ImageDisplayState>,
     /// Lazily-initialized wgpu compute context for the receptor renderer,
     /// shared (`Arc`) with the background render worker; `gpu_attempted`
     /// records that a probe has run (so a machine without a usable adapter
@@ -617,37 +623,60 @@ impl AppState {
         first
     }
 
-    /// Allocates a fresh instance of a repeatable panel kind, gives it blank
-    /// state, and places it (docked or floating); returns its id. Comparison
-    /// instances seed their reference luminant from the first luminant in the
-    /// library.
+    /// The lowest instance number of `kind` not currently open (docked or
+    /// floating), so the first panel of a kind is always instance `0` - titled
+    /// "Comparison", "Image Display", … - and its repeats are numbered
+    /// deterministically.
+    fn next_free_instance(&self, kind: PanelKind) -> u32 {
+        let used: std::collections::HashSet<u32> = self
+            .dock
+            .panels_of_kind(kind)
+            .into_iter()
+            .map(|id| id.instance)
+            .collect();
+        (0u32..)
+            .find(|i| !used.contains(i))
+            .expect("u32 instance space")
+    }
+
+    /// Allocates a fresh instance of a repeatable panel kind and places it
+    /// (docked or floating); returns its id. The new panel inherits its kind's
+    /// *parked* state - the most recently closed panel of that kind, see
+    /// [`AppState::prune_detached_panels`] - when no other panel of that kind
+    /// is open; otherwise it starts blank. Comparison panels default their
+    /// reference luminant to the first luminant in the library.
     pub fn new_panel(&mut self, kind: PanelKind, floating: bool) -> PanelId {
         debug_assert!(
             kind.is_multi_instance(),
             "only repeatable panels can be opened as a new instance"
         );
-        // Comparison/Stimulus Editor reserve instance 0 for their persistent
-        // primary, so their extras start at 1; Image Display starts at 0.
-        let start = if PanelId::singleton(kind).keeps_state_when_closed() {
-            1
-        } else {
-            0
-        };
-        let next = self.next_panel_instance.entry(kind).or_insert(start);
-        let id = PanelId::new(kind, *next);
-        *next += 1;
+        let others_open = !self.dock.panels_of_kind(kind).is_empty();
+        let id = PanelId::new(kind, self.next_free_instance(kind));
         match kind {
             PanelKind::Comparison => {
                 let reference = self.luminant_order.first().copied();
-                self.extra_comparisons
-                    .insert(id, ComparisonState::new(reference));
+                let state = if others_open {
+                    ComparisonState::new(reference)
+                } else {
+                    std::mem::replace(&mut self.comparison, ComparisonState::new(reference))
+                };
+                self.comparisons.insert(id, state);
             }
             PanelKind::StimulusEditor => {
-                self.extra_stimulus_editors
-                    .insert(id, StimulusEditorState::default());
+                let state = if others_open {
+                    StimulusEditorState::default()
+                } else {
+                    std::mem::take(&mut self.stimulus_editor)
+                };
+                self.stimulus_editors.insert(id, state);
             }
             PanelKind::ImageDisplay => {
-                self.image_displays.insert(id, ImageDisplayState::default());
+                let state = if others_open {
+                    ImageDisplayState::default()
+                } else {
+                    self.remembered_image_display.take().unwrap_or_default()
+                };
+                self.image_displays.insert(id, state);
             }
             PanelKind::Workspace => unreachable!("Workspace is not repeatable"),
         }
@@ -680,40 +709,34 @@ impl AppState {
     }
 
     /// Runs `f` with the Comparison instance `id` installed as
-    /// `AppState::comparison`. The primary instance already lives there; an
-    /// extra instance's state is moved in for the duration of the call and
-    /// moved back out afterwards, so the window module can keep reading and
-    /// writing `app.comparison` unchanged.
+    /// `AppState::comparison`. The instance's live state is moved in for the
+    /// duration of the call and moved back out afterwards (the parked state
+    /// that normally occupies the field is restored), so the window module can
+    /// keep reading and writing `app.comparison` unchanged.
     pub fn with_comparison<R>(&mut self, id: PanelId, f: impl FnOnce(&mut Self) -> R) -> R {
         debug_assert_eq!(id.kind, PanelKind::Comparison);
-        if id.instance == 0 {
-            return f(self);
-        }
-        let extra = self.extra_comparisons.remove(&id).unwrap_or_default();
-        let primary = std::mem::replace(&mut self.comparison, extra);
+        let live = self.comparisons.remove(&id).unwrap_or_default();
+        let parked = std::mem::replace(&mut self.comparison, live);
         let result = f(self);
-        let extra = std::mem::replace(&mut self.comparison, primary);
-        self.extra_comparisons.insert(id, extra);
+        let live = std::mem::replace(&mut self.comparison, parked);
+        self.comparisons.insert(id, live);
         result
     }
 
     /// The Stimulus Editor counterpart of [`AppState::with_comparison`].
     pub fn with_stimulus_editor<R>(&mut self, id: PanelId, f: impl FnOnce(&mut Self) -> R) -> R {
         debug_assert_eq!(id.kind, PanelKind::StimulusEditor);
-        if id.instance == 0 {
-            return f(self);
-        }
-        let extra = self.extra_stimulus_editors.remove(&id).unwrap_or_default();
-        let primary = std::mem::replace(&mut self.stimulus_editor, extra);
+        let live = self.stimulus_editors.remove(&id).unwrap_or_default();
+        let parked = std::mem::replace(&mut self.stimulus_editor, live);
         let result = f(self);
-        let extra = std::mem::replace(&mut self.stimulus_editor, primary);
-        self.extra_stimulus_editors.insert(id, extra);
+        let live = std::mem::replace(&mut self.stimulus_editor, parked);
+        self.stimulus_editors.insert(id, live);
         result
     }
 
     /// Applies a dock action and keeps per-panel state consistent with the
     /// layout: `NewInstance` allocates that panel's data, and closing a
-    /// repeatable panel drops its extra instances' state.
+    /// repeatable panel parks its state for the next window of that kind.
     pub fn dispatch_dock_action(&mut self, action: DockAction) {
         match action {
             DockAction::NewInstance(kind) => {
@@ -728,44 +751,66 @@ impl AppState {
         self.prune_detached_panels();
     }
 
-    /// Handles a floating window's OS close button, then drops any panel state
-    /// that leaves behind (a repeatable panel closed this way is discarded).
+    /// Handles a floating window's OS close button, then parks any panel state
+    /// that leaves behind.
     pub fn dismiss_floating(&mut self, id: PanelId) {
         self.dock.floating_window_closed(id);
         self.prune_detached_panels();
     }
 
-    /// Drops state for extra repeatable panels that are no longer docked or
-    /// floating (i.e. were closed), so their render workers are released. The
-    /// primary Comparison/Stimulus Editor state lives in its own field and is
-    /// never dropped (closing it only hides it).
+    /// Parks the state of repeatable panels that are no longer docked or
+    /// floating (i.e. were closed) into its kind's parked slot, from which the
+    /// next window of that kind inherits it (last closed wins). Any earlier
+    /// parked state is dropped - for Image Display that releases its idle
+    /// render worker.
     fn prune_detached_panels(&mut self) {
-        let layout = &self.dock;
-        self.image_displays
-            .retain(|id, _| layout.placement(*id) != Placement::Hidden);
-        self.extra_comparisons
-            .retain(|id, _| layout.placement(*id) != Placement::Hidden);
-        self.extra_stimulus_editors
-            .retain(|id, _| layout.placement(*id) != Placement::Hidden);
+        let hidden: Vec<PanelId> = self
+            .comparisons
+            .keys()
+            .chain(self.stimulus_editors.keys())
+            .chain(self.image_displays.keys())
+            .filter(|id| self.dock.placement(**id) == Placement::Hidden)
+            .copied()
+            .collect();
+        for id in hidden {
+            match id.kind {
+                PanelKind::Comparison => {
+                    if let Some(state) = self.comparisons.remove(&id) {
+                        self.comparison = state;
+                    }
+                }
+                PanelKind::StimulusEditor => {
+                    if let Some(state) = self.stimulus_editors.remove(&id) {
+                        self.stimulus_editor = state;
+                    }
+                }
+                PanelKind::ImageDisplay => {
+                    if let Some(state) = self.image_displays.remove(&id) {
+                        self.remembered_image_display = Some(state);
+                    }
+                }
+                PanelKind::Workspace => {}
+            }
+        }
     }
 
-    /// Removes `set_id` from every Comparison instance's species selection and
-    /// per-species regime memory, so no panel keeps a dangling reference when
-    /// a visual system is deleted.
+    /// Removes `set_id` from every Comparison's species selection and
+    /// per-species regime memory - the parked state and every open instance -
+    /// so no panel keeps a dangling reference when a visual system is deleted.
     pub fn prune_comparison_species(&mut self, set_id: CurveSetId) {
-        for comparison in
-            std::iter::once(&mut self.comparison).chain(self.extra_comparisons.values_mut())
+        for comparison in std::iter::once(&mut self.comparison)
+            .chain(self.comparisons.values_mut())
         {
             comparison.selected_species.retain(|&id| id != set_id);
             comparison.active_regime.remove(&set_id);
         }
     }
 
-    /// Clears every Comparison instance's remembered active regime for
-    /// `set_id`, for when a set's regimes change under the panels' feet.
+    /// Clears every Comparison's remembered active regime for `set_id`, for
+    /// when a set's regimes change under the panels' feet.
     pub fn prune_comparison_active_regime(&mut self, set_id: CurveSetId) {
-        for comparison in
-            std::iter::once(&mut self.comparison).chain(self.extra_comparisons.values_mut())
+        for comparison in std::iter::once(&mut self.comparison)
+            .chain(self.comparisons.values_mut())
         {
             comparison.active_regime.remove(&set_id);
         }
@@ -774,13 +819,13 @@ impl AppState {
     /// Drops a stimulus curve from every Comparison selection and every
     /// Stimulus Editor's selection/pending-unload, for when it is unloaded.
     pub fn forget_stimulus(&mut self, id: CurveId) {
-        for comparison in
-            std::iter::once(&mut self.comparison).chain(self.extra_comparisons.values_mut())
+        for comparison in std::iter::once(&mut self.comparison)
+            .chain(self.comparisons.values_mut())
         {
             comparison.selected_stimuli.retain(|&i| i != id);
         }
         for editor in std::iter::once(&mut self.stimulus_editor)
-            .chain(self.extra_stimulus_editors.values_mut())
+            .chain(self.stimulus_editors.values_mut())
         {
             if editor.selected == Some(id) {
                 editor.selected = None;
@@ -866,15 +911,15 @@ impl AppState {
                 new_tab_name_buf: String::new(),
                 pending_close: None,
             },
+            comparisons: HashMap::new(),
             comparison: ComparisonState::new(Some(uniform_id)),
-            extra_comparisons: HashMap::new(),
             stimulus_curves,
             stimulus_order,
+            stimulus_editors: HashMap::new(),
             stimulus_editor: StimulusEditorState::default(),
-            extra_stimulus_editors: HashMap::new(),
             image_library: ImageLibrary::default(),
             image_displays: HashMap::new(),
-            next_panel_instance: HashMap::new(),
+            remembered_image_display: None,
             gpu: None,
             gpu_attempted: false,
             dock: DockLayout::default(),

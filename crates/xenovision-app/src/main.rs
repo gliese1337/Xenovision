@@ -208,24 +208,23 @@ mod layout_tests {
                 dirty: false,
             },
         );
+        // A freshly opened Stimulus Editor inherits the parked state, so this
+        // mode reaches the live instance.
         app.state.stimulus_editor.creation_mode = window_stimulus_editor::CreationMode::Notch;
         let ctx = egui::Context::default();
-        // Image Display is repeatable, so it needs its (first) instance state
-        // to have something to draw.
-        let img = PanelId::singleton(PanelKind::ImageDisplay);
-        app.state
-            .image_displays
-            .insert(img, window_image_display::ImageDisplayState::default());
         for kind in [
             PanelKind::Comparison,
             PanelKind::StimulusEditor,
             PanelKind::ImageDisplay,
         ] {
-            app.state
-                .dock
-                .apply(DockAction::OpenDocked(PanelId::singleton(kind)));
+            let panel = app.state.new_panel(kind, false);
+            assert_eq!(
+                panel,
+                PanelId::singleton(kind),
+                "the first panel of a kind is always instance 0"
+            );
             run_frames(&mut app, &ctx, 1200.0, 900.0, 3);
-            assert_eq!(app.state.dock.active, PanelId::singleton(kind));
+            assert_eq!(app.state.dock.active, panel);
         }
         // Float everything except one tab (the dock can't be emptied).
         let ws = PanelId::singleton(PanelKind::Workspace);
@@ -235,7 +234,10 @@ mod layout_tests {
             .apply(DockAction::Undock(PanelId::singleton(PanelKind::Comparison)));
         assert_eq!(
             app.state.dock.docked,
-            vec![PanelId::singleton(PanelKind::StimulusEditor), img]
+            vec![
+                PanelId::singleton(PanelKind::StimulusEditor),
+                PanelId::singleton(PanelKind::ImageDisplay)
+            ]
         );
         run_frames(&mut app, &ctx, 1200.0, 900.0, 3);
         // Requests queued from inside a panel are applied at frame end.
@@ -267,57 +269,72 @@ mod layout_tests {
         assert!(app.state.image_displays.contains_key(&b));
     }
 
-    /// Comparison and Stimulus Editor are repeatable too: extra instances keep
+    /// Comparison and Stimulus Editor are repeatable: each instance keeps
     /// independent state (swapped into the module's `AppState` slot only while
-    /// that instance draws), the persistent primary is untouched, and closing
-    /// an extra discards just that instance.
+    /// that instance draws), and closing a panel *parks* its setup so the next
+    /// window of that kind inherits the most recently closed one - but only
+    /// when no other window of that kind is open.
     #[test]
-    fn extra_comparison_and_stimulus_panels_keep_independent_state() {
+    fn repeatable_panels_park_the_last_closed_setup() {
         let mut app = App::default();
         let ctx = egui::Context::default();
         let set_a = app.state.workspace.open_tabs[0];
         let set_b = app.state.workspace.open_tabs[1];
 
         let a = app.state.new_panel(PanelKind::Comparison, false);
+        assert_eq!(a, PanelId::singleton(PanelKind::Comparison));
         let b = app.state.new_panel(PanelKind::Comparison, true);
         assert_ne!(a, b);
-        assert_eq!(a.instance, 1, "instance 0 is the persistent primary");
-        assert_eq!(b.instance, 2);
+        assert_eq!(b.instance, 1);
         app.state
             .with_comparison(a, |s| s.comparison.selected_species = vec![set_a]);
         app.state
             .with_comparison(b, |s| s.comparison.selected_species = vec![set_b]);
-        assert!(
-            app.state.comparison.selected_species.is_empty(),
-            "an extra panel must not leak into the primary's state"
-        );
-
-        app.state.dock.apply(DockAction::Undock(a));
-        run_frames(&mut app, &ctx, 1000.0, 700.0, 3);
         app.state
             .with_comparison(a, |s| assert_eq!(s.comparison.selected_species, vec![set_a]));
         app.state
             .with_comparison(b, |s| assert_eq!(s.comparison.selected_species, vec![set_b]));
 
-        // Closing an extra discards it; the other and the primary persist.
-        app.state.dispatch_dock_action(DockAction::Close(b));
-        assert!(!app.state.extra_comparisons.contains_key(&b));
-        assert!(app.state.extra_comparisons.contains_key(&a));
+        // Drawing the panels (state swapped in per instance) must not disturb
+        // either instance's own state.
+        run_frames(&mut app, &ctx, 1000.0, 700.0, 2);
+        app.state
+            .with_comparison(a, |s| assert_eq!(s.comparison.selected_species, vec![set_a]));
+        app.state
+            .with_comparison(b, |s| assert_eq!(s.comparison.selected_species, vec![set_b]));
 
-        let e1 = app.state.new_panel(PanelKind::StimulusEditor, false);
-        let e2 = app.state.new_panel(PanelKind::StimulusEditor, true);
+        // Closing b parks b's setup; a keeps its own.
+        app.state.dispatch_dock_action(DockAction::Close(b));
+        assert!(!app.state.comparisons.contains_key(&b));
+        assert!(app.state.comparisons.contains_key(&a));
+        assert_eq!(app.state.comparison.selected_species, vec![set_b]);
+
+        // Close a too: last-closed wins, so a newly opened Comparison inherits
+        // a's setup; a second window opened while one is already open starts
+        // blank.
+        app.state.dispatch_dock_action(DockAction::Close(a));
+        let c = app.state.new_panel(PanelKind::Comparison, false);
+        app.state
+            .with_comparison(c, |s| assert_eq!(s.comparison.selected_species, vec![set_a]));
+        let d = app.state.new_panel(PanelKind::Comparison, true);
+        app.state
+            .with_comparison(d, |s| assert!(s.comparison.selected_species.is_empty()));
+
+        // Stimulus Editor behaves the same way, reusing the freed instance
+        // number when it is the only window of its kind.
         let stim_a = app.state.stimulus_order[0];
-        let stim_b = app.state.stimulus_order[1];
+        let e1 = app.state.new_panel(PanelKind::StimulusEditor, false);
         app.state
             .with_stimulus_editor(e1, |s| s.stimulus_editor.selected = Some(stim_a));
+        app.state.dispatch_dock_action(DockAction::Close(e1));
+        let e2 = app.state.new_panel(PanelKind::StimulusEditor, false);
+        assert_eq!(e2, e1, "reopening reuses the freed instance number");
+        app.state.with_stimulus_editor(e2, |s| {
+            assert_eq!(s.stimulus_editor.selected, Some(stim_a))
+        });
+        let e3 = app.state.new_panel(PanelKind::StimulusEditor, true);
         app.state
-            .with_stimulus_editor(e2, |s| s.stimulus_editor.selected = Some(stim_b));
-        run_frames(&mut app, &ctx, 1000.0, 700.0, 3);
-        app.state
-            .with_stimulus_editor(e1, |s| assert_eq!(s.stimulus_editor.selected, Some(stim_a)));
-        app.state
-            .with_stimulus_editor(e2, |s| assert_eq!(s.stimulus_editor.selected, Some(stim_b)));
-        assert_eq!(app.state.stimulus_editor.selected, None);
+            .with_stimulus_editor(e3, |s| assert_eq!(s.stimulus_editor.selected, None));
     }
 
     /// With every species and stimulus selected, the cross-species table
@@ -326,11 +343,11 @@ mod layout_tests {
     #[test]
     fn comparison_frames_reuse_cached_pipelines() {
         let mut app = App::default();
-        app.state
-            .dock
-            .apply(DockAction::OpenDocked(PanelId::singleton(PanelKind::Comparison)));
-        app.state.comparison.selected_species = app.state.workspace.open_tabs.clone();
-        app.state.comparison.selected_stimuli = app.state.stimulus_order.clone();
+        let id = app.state.new_panel(PanelKind::Comparison, false);
+        app.state.with_comparison(id, |s| {
+            s.comparison.selected_species = s.workspace.open_tabs.clone();
+            s.comparison.selected_stimuli = s.stimulus_order.clone();
+        });
         let ctx = egui::Context::default();
         run_frames(&mut app, &ctx, 1400.0, 900.0, 2);
         let start = std::time::Instant::now();
@@ -374,9 +391,7 @@ mod layout_tests {
             PanelKind::StimulusEditor,
             PanelKind::ImageDisplay,
         ] {
-            app.state
-                .dock
-                .apply(DockAction::OpenDocked(PanelId::singleton(kind)));
+            app.state.new_panel(kind, false);
             run_frames(&mut app, &ctx, 400.0, 300.0, 3);
         }
     }
