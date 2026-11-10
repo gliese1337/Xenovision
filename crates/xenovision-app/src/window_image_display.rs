@@ -38,6 +38,11 @@ use crate::state::{AppCurveSet, AppState, CurveId, CurveSetId};
 
 const STEP_NM: f64 = 1.0;
 
+/// `DisplayMode::DeltaSGradient`'s own numeric result: row-major
+/// magnitudes plus their (min, max), mirroring
+/// `xenovision_core::delta_s_gradient_magnitude`'s return shape.
+type DeltaSGradientResult = (Vec<f32>, f32, f32);
+
 /// How a view turns its output channels into pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplayMode {
@@ -45,6 +50,14 @@ pub enum DisplayMode {
     Channels,
     /// One combined image (the default for perceptual).
     Composite,
+    /// Per-pixel ΔS (Vorobyev-Osorio) gradient magnitude - a "comparison
+    /// image" that highlights where the species' own perceptual system
+    /// registers a strong edge (camouflage breaking down, a boundary one
+    /// visual system sees and another doesn't) rather than where the raw
+    /// sensor data has one. Requires the `AdaptedReceptor` stage and a
+    /// regime with complete ΔS noise data (`xenovision_core::
+    /// receptor_image::delta_s_gradient_magnitude`'s own gating).
+    DeltaSGradient,
 }
 
 /// Which combined image a `DisplayMode::Composite` view draws.
@@ -148,9 +161,19 @@ impl ImageView {
 /// A finished render: the channel data plus the textures currently shown.
 pub struct RenderedView {
     pub image: ReceptorImage,
-    /// One texture for `DisplayMode::Channels`, one for `Composite`.
+    /// One texture for `DisplayMode::Channels`, one for `Composite`/
+    /// `DeltaSGradient`.
     pub textures: Vec<egui::TextureHandle>,
     pub used_gpu: bool,
+    /// `DeltaSGradient`'s own per-pixel result (magnitudes, min, max),
+    /// cached alongside the texture it was built from - computing it is
+    /// an `O(pixels × channels)` threaded pass, not the cheap array
+    /// indexing `channel_legend`/`composite_legend` do, so it's computed
+    /// once per texture rebuild (`build_textures`) rather than again
+    /// every frame just to word the legend. `None` when the display mode
+    /// isn't `DeltaSGradient`, or the gradient itself is unavailable
+    /// (wrong stage, missing noise data).
+    delta_s_gradient: Option<DeltaSGradientResult>,
 }
 
 /// Image Display window state.
@@ -375,7 +398,9 @@ fn render_pass(ctx: &egui::Context, app: &mut AppState, id: PanelId) {
             continue;
         }
         if let Some(mut rendered) = view.render.take() {
-            rendered.textures = build_textures(ctx, view, &rendered.image);
+            let (textures, delta_s_gradient) = build_textures(ctx, view, &rendered.image);
+            rendered.textures = textures;
+            rendered.delta_s_gradient = delta_s_gradient;
             view.render = Some(rendered);
             view.texture_mapping = Some(mapping(view));
         }
@@ -402,11 +427,12 @@ fn install_outcome(ctx: &egui::Context, outcome: RenderOutcome, views: &mut [Ima
     view.pending = None;
     match outcome.result {
         Ok(RenderProduct { image, used_gpu }) => {
-            let textures = build_textures(ctx, view, &image);
+            let (textures, delta_s_gradient) = build_textures(ctx, view, &image);
             view.render = Some(RenderedView {
                 image,
                 textures,
                 used_gpu,
+                delta_s_gradient,
             });
             view.texture_mapping = Some(mapping(view));
             view.error = None;
@@ -562,24 +588,69 @@ fn build_job(
     Ok((kernel, view.region.clone(), cube))
 }
 
-/// Builds the texture(s) shown for a finished render, per display mode.
+/// Builds the texture(s) shown for a finished render, per display mode,
+/// plus `DeltaSGradient`'s own cached numeric result (`None` for every
+/// other mode, or when the gradient itself is unavailable) - computed
+/// here, once per texture rebuild, so the legend doesn't redo the same
+/// threaded pass every frame just to word its range text.
 fn build_textures(
     ctx: &egui::Context,
     view: &ImageView,
     image: &ReceptorImage,
-) -> Vec<egui::TextureHandle> {
+) -> (Vec<egui::TextureHandle>, Option<DeltaSGradientResult>) {
     let opts = egui::TextureOptions::NEAREST;
     match view.display {
-        DisplayMode::Channels => (0..image.channels.len())
-            .map(|c| {
-                let ci = channel_color_image(image, c, view.colormap);
-                ctx.load_texture(format!("rec_v{}_c{}", view.id, c), ci, opts)
-            })
-            .collect(),
+        DisplayMode::Channels => (
+            (0..image.channels.len())
+                .map(|c| {
+                    let ci = channel_color_image(image, c, view.colormap);
+                    ctx.load_texture(format!("rec_v{}_c{}", view.id, c), ci, opts)
+                })
+                .collect(),
+            None,
+        ),
         DisplayMode::Composite => {
             let ci = composite_color_image(image, view.composite);
-            vec![ctx.load_texture(format!("rec_v{}_comp", view.id), ci, opts)]
+            (
+                vec![ctx.load_texture(format!("rec_v{}_comp", view.id), ci, opts)],
+                None,
+            )
         }
+        DisplayMode::DeltaSGradient => {
+            let gradient = xenovision_core::delta_s_gradient_magnitude(image);
+            let ci = delta_s_gradient_color_image(image, view.colormap, gradient.as_ref());
+            (
+                vec![ctx.load_texture(format!("rec_v{}_grad", view.id), ci, opts)],
+                gradient,
+            )
+        }
+    }
+}
+
+/// `None`-case fallback: an all-black image at the render's actual
+/// dimensions, so a view whose gradient is unavailable (wrong stage,
+/// missing noise data) still shows *something* sized correctly rather
+/// than a 0x0 texture or a stale one left over from a different display
+/// mode.
+fn delta_s_gradient_color_image(
+    image: &ReceptorImage,
+    cmap: Colormap,
+    gradient: Option<&(Vec<f32>, f32, f32)>,
+) -> egui::ColorImage {
+    let n_pixels = image.n_pixels();
+    let pixels = match gradient {
+        Some((magnitudes, min, max)) => {
+            let span = (max - min).max(f32::MIN_POSITIVE);
+            magnitudes
+                .iter()
+                .map(|&v| cmap.apply(((v - min) / span).clamp(0.0, 1.0)))
+                .collect()
+        }
+        None => vec![egui::Color32::BLACK; n_pixels],
+    };
+    egui::ColorImage {
+        size: [image.width, image.height],
+        pixels,
     }
 }
 
@@ -1206,9 +1277,29 @@ fn display_settings(ui: &mut egui::Ui, view: &mut ImageView) {
             "One panel per channel",
         );
         ui.selectable_value(&mut view.display, DisplayMode::Composite, "Composite image");
+        ui.selectable_value(
+            &mut view.display,
+            DisplayMode::DeltaSGradient,
+            "ΔS gradient magnitude",
+        );
     });
     match view.display {
         DisplayMode::Channels => {
+            ui.horizontal(|ui| {
+                ui.label("Colormap:");
+                for cm in Colormap::ALL {
+                    ui.selectable_value(&mut view.colormap, cm, cm.name());
+                }
+            });
+        }
+        DisplayMode::DeltaSGradient => {
+            if view.stage != ChannelStage::AdaptedReceptor {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 180, 40),
+                    "⚠ Switch the stage above to \"von Kries adapted\" - the gradient needs \
+                     adapted activations to compare.",
+                );
+            }
             ui.horizontal(|ui| {
                 ui.label("Colormap:");
                 for cm in Colormap::ALL {
@@ -1386,6 +1477,16 @@ fn view_images(ui: &mut egui::Ui, view: &ImageView, rendered: &RenderedView) {
             pixel_readout(ui, image, &resp);
             ui.label(composite_legend(view, image));
         }
+        DisplayMode::DeltaSGradient => {
+            let max_w = ui.available_width().min(720.0);
+            let size = panel_size(image.width, image.height, max_w);
+            let resp = draw_texture(ui, &rendered.textures[0], size);
+            pixel_readout(ui, image, &resp);
+            ui.horizontal(|ui| {
+                ui.label(delta_s_gradient_legend(rendered.delta_s_gradient.as_ref()));
+                draw_colormap_gradient(ui, view.colormap);
+            });
+        }
     }
 }
 
@@ -1484,6 +1585,18 @@ fn composite_legend(view: &ImageView, image: &ReceptorImage) -> String {
     }
 }
 
+fn delta_s_gradient_legend(gradient: Option<&DeltaSGradientResult>) -> String {
+    match gradient {
+        Some((_, min, max)) => format!(
+            "ΔS gradient magnitude (JND units/pixel), right+below forward differences · \
+             range {min:.3}–{max:.3}"
+        ),
+        None => "ΔS gradient unavailable: needs the von Kries adapted stage, with complete \
+                  noise data on every receptor of this regime."
+            .to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1574,6 +1687,83 @@ mod tests {
             view.pending.is_none(),
             "the render should no longer be pending"
         );
+    }
+
+    /// End-to-end for the ΔS gradient display mode: the built-in Human
+    /// fixture has complete omega/eta on its one regime (§2.3.1), so a
+    /// view set to `AdaptedReceptor` + `DeltaSGradient` against it must
+    /// come back with the gradient actually computed (not the "wrong
+    /// stage"/"no noise data" `None` fallback) and a texture sized to
+    /// the cube.
+    #[test]
+    fn delta_s_gradient_renders_for_a_species_with_noise_data() {
+        use crate::image_library::ImageSource;
+        use xenovision_core::hyperspectral::HyperspectralCube;
+
+        let mut app = crate::state::AppState::new();
+        let human_set = app
+            .curve_sets
+            .iter()
+            .find(|(_, s)| s.name.starts_with("Human"))
+            .map(|(id, _)| *id)
+            .expect("the Human fixture is always seeded");
+
+        // Two visibly different "patches" (not just a brightness edge) so
+        // the gradient has somewhere real to find.
+        let (w, h) = (4usize, 3usize);
+        let wavelengths = vec![430.0, 530.0, 560.0];
+        let mut data = vec![0.0f32; w * h * wavelengths.len()];
+        for b in 0..wavelengths.len() {
+            for row in 0..h {
+                for col in 0..w {
+                    let v = if col < w / 2 {
+                        if b == 0 {
+                            0.8
+                        } else {
+                            0.2
+                        }
+                    } else if b == 0 {
+                        0.2
+                    } else {
+                        0.8
+                    };
+                    data[b * h * w + row * w + col] = v;
+                }
+            }
+        }
+        let cube = HyperspectralCube::from_band_major(
+            w,
+            h,
+            wavelengths.len(),
+            Some(wavelengths),
+            data,
+            "patchy",
+        );
+        let id = app
+            .image_library
+            .add(ImageSource::new("patchy", "patchy", cube));
+        let panel = app.new_image_display(false);
+        let idx = seed_view(&mut app, panel, Some(id), None);
+        {
+            let view = &mut app.image_displays.get_mut(&panel).unwrap().views[idx];
+            view.set_id = Some(human_set);
+            view.stage = ChannelStage::AdaptedReceptor;
+            view.display = DisplayMode::DeltaSGradient;
+        }
+
+        let ctx = egui::Context::default();
+        render_now(&mut app, &ctx, panel, idx);
+
+        let view = &app.image_displays[&panel].views[idx];
+        assert!(view.error.is_none(), "render error: {:?}", view.error);
+        let rendered = view.render.as_ref().expect("a render exists");
+        assert_eq!(rendered.image.stage, ChannelStage::AdaptedReceptor);
+        assert_eq!(rendered.textures.len(), 1, "one composite texture");
+        let (_, _, max) = rendered
+            .delta_s_gradient
+            .as_ref()
+            .expect("Human has complete noise data, the gradient must be computed");
+        assert!(*max > 0.0, "a real spectral edge must produce nonzero ΔS");
     }
 
     /// A changed view hands its render to the worker (marked pending) rather

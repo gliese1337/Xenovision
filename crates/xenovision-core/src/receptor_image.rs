@@ -97,6 +97,14 @@ pub struct ReceptorKernel {
     caps: Vec<Option<f64>>,
     /// Composed von Kries map `Q' = A·Q`, square `N_receptors × N_receptors`.
     adaptation: Option<Mat>,
+    /// This regime's Vorobyev-Osorio per-receptor noise terms
+    /// (`RegimeConfig.noise`), if every member has complete omega/eta
+    /// data - carried through so `delta_s_gradient_magnitude` can use the
+    /// exact noise vector the regime's own `Pipeline`/ΔS comparisons use,
+    /// without a caller having to separately re-resolve the regime.
+    /// `None` for a pool kernel (`for_pool`), which has no regime to draw
+    /// noise from.
+    noise: Option<Vec<f64>>,
     /// Perceptual output rows `[L, C_1..]`, each `N_receptors` coefficients
     /// (not necessarily `N` rows - a regime whose literature contrasts
     /// resolve to fewer chroma axes outputs proportionally fewer channels).
@@ -207,6 +215,7 @@ impl ReceptorKernel {
             gains,
             caps,
             adaptation,
+            noise: config.noise.clone(),
             opponent,
             names,
             n_out,
@@ -279,6 +288,7 @@ impl ReceptorKernel {
             gains,
             caps,
             adaptation: None,
+            noise: None,
             opponent: None,
             names,
             n_out: n_receptors,
@@ -457,6 +467,7 @@ impl ReceptorKernel {
             channels: self.names.clone(),
             stage: self.stage,
             regime_name: self.regime_name.clone(),
+            noise: self.noise.clone(),
             data,
             range,
             mask,
@@ -506,6 +517,7 @@ impl ReceptorKernel {
             channels: self.names.clone(),
             stage: self.stage,
             regime_name: self.regime_name.clone(),
+            noise: self.noise.clone(),
             data,
             range,
             mask,
@@ -568,6 +580,122 @@ impl ReceptorKernel {
     pub fn adaptation_transform(&self) -> Option<&Mat> {
         self.adaptation.as_ref()
     }
+
+    /// This regime's Vorobyev-Osorio per-receptor noise terms, if complete
+    /// (see `RegimeConfig.noise`/`CurveSet::regime_config`) - `None` for a
+    /// pool kernel ([`ReceptorKernel::for_pool`]), or a regime missing
+    /// omega/eta on some member. Required by `delta_s_gradient_magnitude`,
+    /// which otherwise has no way to judge what counts as a perceptually
+    /// significant difference between two adjacent pixels' adapted
+    /// activations.
+    pub fn noise(&self) -> Option<&[f64]> {
+        self.noise.as_deref()
+    }
+}
+
+/// Per-pixel ΔS (Vorobyev-Osorio) gradient magnitude over an already-
+/// rendered `ChannelStage::AdaptedReceptor` image - a "comparison image"
+/// variant of the §3.3.2 ΔS distance metric, applied not between named
+/// input spectra but between each pixel and its right/below neighbor, the
+/// same way an ordinary image gradient is a spatial derivative of pixel
+/// intensity rather than a comparison between two whole images. At pixel
+/// `(x, y)`:
+///
+/// `magnitude = sqrt(ΔS(p, right neighbor)^2 + ΔS(p, below neighbor)^2)`
+///
+/// using forward differences (undefined - here, zero - off whichever edge
+/// has no further neighbor, the same convention `hyperspectral`'s own
+/// region-bounds clamping uses). This highlights where a species' *own*
+/// perceptual system would register a strong edge - camouflage breaking
+/// down, or a boundary invisible to one visual system but not another -
+/// rather than where the raw sensor data has one, which is what a
+/// conventional intensity-gradient view would show instead.
+///
+/// `None` if `image.stage` isn't `AdaptedReceptor`, if `image.noise()` is
+/// unavailable (ΔS is undefined without it, same gating
+/// `comparison::distance` uses), or if the channel count doesn't match the
+/// noise vector's length. Respects `image`'s region mask: a masked-out
+/// pixel, or a pixel whose neighbor is masked out, contributes zero to
+/// that side of the gradient rather than comparing across the region
+/// boundary. Returns the magnitude grid, row-major (`height x width`,
+/// matching `ReceptorImage`'s own pixel layout) alongside its (min, max)
+/// for a caller to normalize into a displayable image.
+pub fn delta_s_gradient_magnitude(image: &ReceptorImage) -> Option<(Vec<f32>, f32, f32)> {
+    if image.stage != ChannelStage::AdaptedReceptor {
+        return None;
+    }
+    let noise = image.noise()?;
+    let n_channels = image.channels.len();
+    if noise.len() != n_channels {
+        return None;
+    }
+    let (width, height) = (image.width, image.height);
+    let n_pixels = image.n_pixels();
+    if n_pixels == 0 {
+        return Some((Vec::new(), 0.0, 0.0));
+    }
+    let mask = image.mask();
+    let in_bounds = |i: usize| mask.is_none_or(|m| m[i]);
+
+    // Gather every pixel's adapted activations once, pixel-major (the
+    // image itself is channel-major), so the gradient loop below reads
+    // one contiguous slice per pixel instead of striding across the
+    // channel-major data `n_channels` times per comparison.
+    let mut activations = vec![0.0f64; n_pixels * n_channels];
+    for c in 0..n_channels {
+        let chan = image.channel(c).expect("c < n_channels");
+        for p in 0..n_pixels {
+            activations[p * n_channels + c] = chan[p] as f64;
+        }
+    }
+
+    let indices: Vec<usize> = (0..n_pixels).collect();
+    let chunk = indices.len().div_ceil(worker_count(indices.len()));
+    let magnitudes: Vec<f32> = std::thread::scope(|scope| {
+        let activations = &activations;
+        let handles: Vec<_> = indices
+            .chunks(chunk)
+            .map(|chunk_indices| {
+                scope.spawn(move || {
+                    chunk_indices
+                        .iter()
+                        .map(|&p| {
+                            if !in_bounds(p) {
+                                return 0.0f32;
+                            }
+                            let row = p / width;
+                            let col = p % width;
+                            let here = &activations[p * n_channels..(p + 1) * n_channels];
+                            let dx = if col + 1 < width && in_bounds(p + 1) {
+                                let right =
+                                    &activations[(p + 1) * n_channels..(p + 2) * n_channels];
+                                crate::comparison::delta_s_raw(here, right, noise)
+                            } else {
+                                0.0
+                            };
+                            let dy = if row + 1 < height && in_bounds(p + width) {
+                                let below_start = (p + width) * n_channels;
+                                let below = &activations[below_start..below_start + n_channels];
+                                crate::comparison::delta_s_raw(here, below, noise)
+                            } else {
+                                0.0
+                            };
+                            (dx * dx + dy * dy).sqrt() as f32
+                        })
+                        .collect::<Vec<f32>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("ΔS gradient thread panicked"))
+            .collect()
+    });
+
+    let (min, max) = magnitudes
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(mn, mx), &v| (mn.min(v), mx.max(v)));
+    Some((magnitudes, min, max))
 }
 
 /// The rendered image: one channel per receptor (or perceptual channel),
@@ -584,6 +712,11 @@ pub struct ReceptorImage {
     pub stage: ChannelStage,
     /// The regime this image renders, or `None` for a pool render.
     pub regime_name: Option<String>,
+    /// The rendering kernel's own `ReceptorKernel::noise` - carried
+    /// through so `delta_s_gradient_magnitude` can be computed from the
+    /// image alone, without the caller having to keep the (otherwise
+    /// discardable, after rendering) kernel alive just for this.
+    noise: Option<Vec<f64>>,
     /// Channel-major as documented on the struct.
     data: Vec<f32>,
     /// Per-channel `(min, max)` over masked-in pixels (or all pixels when
@@ -597,6 +730,13 @@ pub struct ReceptorImage {
 impl ReceptorImage {
     pub fn n_pixels(&self) -> usize {
         self.width * self.height
+    }
+
+    /// The rendering kernel's Vorobyev-Osorio per-receptor noise terms
+    /// (`ReceptorKernel::noise`), if complete - `None` for a pool render,
+    /// or a regime missing omega/eta on some member.
+    pub fn noise(&self) -> Option<&[f64]> {
+        self.noise.as_deref()
     }
 
     /// One channel's pixel values (channel-major), or `None` for an out-of-
@@ -861,6 +1001,19 @@ mod tests {
         }
         set.regimes
             .push(crate::curve_set::Regime::new("Photopic", vec![0, 1, 2]));
+        set
+    }
+
+    /// `trichromat_set`, but with complete omega/eta on every colorspace
+    /// curve, so its regime's `RegimeConfig.noise` (and so
+    /// `ReceptorKernel::noise`) is `Some` - the precondition
+    /// `delta_s_gradient_magnitude` needs.
+    fn noisy_trichromat_set() -> CurveSet {
+        let mut set = trichromat_set();
+        for c in set.curves.iter_mut() {
+            c.omega = Some(0.1);
+            c.eta = Some(1.0);
+        }
         set
     }
 
@@ -1513,5 +1666,142 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A cube with a real spectral edge: left half reddish (low at short
+    /// wavelengths, high at long), right half greenish (peaked
+    /// mid-spectrum) - same shape `hyperspectral`'s own gradient tests
+    /// use, so the gradient has somewhere real to find rather than being
+    /// uniformly zero.
+    fn patchy_cube(samples: usize, lines: usize) -> HyperspectralCube {
+        let n_bands = AXIS.len();
+        let mut data = vec![0.0f32; samples * lines * n_bands];
+        for b in 0..n_bands {
+            for row in 0..lines {
+                for col in 0..samples {
+                    let v = if col < samples / 2 {
+                        if b < n_bands / 2 {
+                            0.2
+                        } else {
+                            0.9
+                        }
+                    } else if b == n_bands / 2 {
+                        0.9
+                    } else {
+                        0.2
+                    };
+                    data[b * lines * samples + row * samples + col] = v;
+                }
+            }
+        }
+        test_cube(samples, lines, data)
+    }
+
+    fn adapted_kernel(set: &CurveSet) -> ReceptorKernel {
+        let config = set.regime_config(&set.regimes[0]);
+        let light = flat_light();
+        ReceptorKernel::for_regime(
+            &config,
+            &AXIS,
+            Some(&light),
+            InputKind::Radiance,
+            ChannelStage::AdaptedReceptor,
+            STEP_NM,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn delta_s_gradient_magnitude_is_none_for_a_non_adapted_stage() {
+        let set = noisy_trichromat_set();
+        let config = set.regime_config(&set.regimes[0]);
+        let light = flat_light();
+        let raw_kernel = ReceptorKernel::for_regime(
+            &config,
+            &AXIS,
+            Some(&light),
+            InputKind::Radiance,
+            ChannelStage::RawReceptor,
+            STEP_NM,
+        )
+        .unwrap();
+        let cube = patchy_cube(4, 3);
+        let image = raw_kernel.render(&cube, None).unwrap();
+        assert_eq!(image.stage, ChannelStage::RawReceptor);
+        assert!(delta_s_gradient_magnitude(&image).is_none());
+    }
+
+    #[test]
+    fn delta_s_gradient_magnitude_is_none_without_noise_data() {
+        // trichromat_set (not the noisy variant) has no omega/eta, so its
+        // regime's noise - and so the gradient - is undefined.
+        let set = trichromat_set();
+        let kernel = adapted_kernel(&set);
+        assert!(kernel.noise().is_none());
+        let cube = patchy_cube(4, 3);
+        let image = kernel.render(&cube, None).unwrap();
+        assert!(delta_s_gradient_magnitude(&image).is_none());
+    }
+
+    #[test]
+    fn delta_s_gradient_magnitude_bottom_right_corner_has_no_further_neighbor() {
+        // Forward differences have no further neighbor past the last
+        // column *and* row at once, so only the bottom-right corner (zero
+        // dx *and* zero dy) is guaranteed exactly zero.
+        let set = noisy_trichromat_set();
+        let kernel = adapted_kernel(&set);
+        let cube = patchy_cube(4, 3);
+        let image = kernel.render(&cube, None).unwrap();
+        let (magnitudes, _, _) = delta_s_gradient_magnitude(&image).unwrap();
+        assert_eq!(magnitudes.len(), image.n_pixels());
+        let last = (image.height - 1) * image.width + (image.width - 1);
+        assert_eq!(magnitudes[last], 0.0);
+    }
+
+    #[test]
+    fn delta_s_gradient_magnitude_finds_the_patch_boundary() {
+        // The reddish/greenish boundary sits between columns 1 and 2
+        // (0-indexed, for a 4-sample-wide cube) on every row - the
+        // gradient magnitude at column 1 (whose rightward neighbor
+        // crosses the boundary) must exceed the magnitude at column 0
+        // (whose rightward neighbor is the same patch), on every row.
+        let set = noisy_trichromat_set();
+        let kernel = adapted_kernel(&set);
+        let cube = patchy_cube(4, 3);
+        let image = kernel.render(&cube, None).unwrap();
+        let (magnitudes, _, max) = delta_s_gradient_magnitude(&image).unwrap();
+        assert!(max > 0.0, "a real spectral edge must produce nonzero ΔS");
+        for row in 0..image.height {
+            let at_boundary = magnitudes[row * image.width + 1];
+            let within_patch = magnitudes[row * image.width];
+            assert!(
+                at_boundary > within_patch,
+                "row {row}: boundary={at_boundary} within_patch={within_patch}"
+            );
+        }
+    }
+
+    #[test]
+    fn delta_s_gradient_magnitude_respects_the_region_mask() {
+        // A region covering only the left (reddish) patch: no pixel in
+        // the rendered image ever sees a neighbor across the boundary
+        // (either because it's not in the region at all, or because its
+        // would-be cross-boundary neighbor is masked out), so the whole
+        // gradient must be zero even though the same cube's unmasked
+        // render finds a real edge (confirmed above).
+        let set = noisy_trichromat_set();
+        let kernel = adapted_kernel(&set);
+        let cube = patchy_cube(4, 3);
+        let region = Region::Rectangle {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 2.0,
+            y1: 3.0,
+        };
+        let image = kernel.render(&cube, Some(&region)).unwrap();
+        assert!(image.mask().is_some());
+        let (magnitudes, _, max) = delta_s_gradient_magnitude(&image).unwrap();
+        assert_eq!(max, 0.0, "no edge should be visible within one patch");
+        assert!(magnitudes.iter().all(|&v| v == 0.0));
     }
 }

@@ -77,16 +77,31 @@ pub fn distance(
             {
                 return None;
             }
-            let sum: f64 = a
-                .adapted_activations
-                .iter()
-                .zip(b.adapted_activations.iter())
-                .zip(noise.iter())
-                .map(|((qa, qb), e)| ((qa - qb) / e).powi(2))
-                .sum();
-            Some(sum.sqrt())
+            Some(delta_s_raw(
+                &a.adapted_activations,
+                &b.adapted_activations,
+                noise,
+            ))
         }
     }
+}
+
+/// The ΔS per-receptor-noise formula itself (`distance`'s `DeltaS` arm's
+/// doc comment above has the math), on bare adapted-activation vectors
+/// rather than full `Coordinates` - shared with
+/// `receptor_image::delta_s_gradient_image`, which needs this same
+/// formula between spatially adjacent pixels rather than between named
+/// input spectra, so the two don't carry two independently-maintained
+/// copies of it. Callers are responsible for length-matching `a`, `b`,
+/// and `noise` themselves; `distance` above does that check before
+/// calling this.
+pub fn delta_s_raw(a: &[f64], b: &[f64], noise: &[f64]) -> f64 {
+    a.iter()
+        .zip(b.iter())
+        .zip(noise.iter())
+        .map(|((qa, qb), e)| ((qa - qb) / e).powi(2))
+        .sum::<f64>()
+        .sqrt()
 }
 
 /// The symmetric, zero-diagonal N×N matrix of pairwise distances across
